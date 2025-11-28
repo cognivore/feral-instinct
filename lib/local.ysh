@@ -18,9 +18,9 @@ proc ensure-tunnelblick {
     echo "Tunnelblick is already installed"
     return 0
   }
-  
+
   echo "Installing Tunnelblick via Homebrew..."
-  
+
   # Check if brew is available
   try {
     command -v brew > /dev/null
@@ -30,9 +30,9 @@ proc ensure-tunnelblick {
     echo "Install from https://brew.sh"
     return 1
   }
-  
+
   brew install --cask tunnelblick
-  
+
   if (_status === 0) {
     echo "Tunnelblick installed successfully"
     return 0
@@ -47,12 +47,12 @@ proc create-tblk-bundle (config_dir, out_dir) {
   # Args:
   #   config_dir: Directory containing OpenVPN configs
   #   out_dir: Output directory for the bundle (default: current dir)
-  
+
   if (config_dir === '') {
     echo "Error: config_dir argument required"
     return 1
   }
-  
+
   try {
     test -d $config_dir
   }
@@ -60,11 +60,11 @@ proc create-tblk-bundle (config_dir, out_dir) {
     echo "Error: Config directory does not exist: $config_dir"
     return 1
   }
-  
+
   var bundle_path = "$out_dir/$BUNDLE_NAME"
-  
+
   echo "Creating Tunnelblick bundle: $bundle_path"
-  
+
   # Remove existing bundle if present
   try {
     test -d $bundle_path
@@ -72,17 +72,17 @@ proc create-tblk-bundle (config_dir, out_dir) {
   if (_status === 0) {
     rm -rf $bundle_path
   }
-  
-  # Create bundle directory and copy configs using glob
+
+  # Create bundle directory and copy configs (exclude backup files)
   mkdir -p $bundle_path
   try {
-    cp @[glob("$config_dir/*")] $bundle_path/
+    cp @[glob("$config_dir/*.ovpn")] $bundle_path/
   }
   if (_status !== 0) {
     echo "Failed to create bundle"
     return 1
   }
-  
+
   echo "Bundle created: $bundle_path"
   ls -la $bundle_path
 }
@@ -91,12 +91,12 @@ proc install-config (bundle_path) {
   # Install .tblk bundle into Tunnelblick
   # Args:
   #   bundle_path: Path to the .tblk bundle
-  
+
   if (bundle_path === '') {
     echo "Error: bundle_path argument required"
     return 1
   }
-  
+
   try {
     test -d $bundle_path
   }
@@ -104,12 +104,12 @@ proc install-config (bundle_path) {
     echo "Error: Bundle does not exist: $bundle_path"
     return 1
   }
-  
+
   echo "Installing configuration to Tunnelblick..."
-  
+
   # Open the bundle with Tunnelblick (triggers import dialog)
   open -a Tunnelblick $bundle_path
-  
+
   echo "Tunnelblick should now prompt to install the configuration."
   echo "Follow the prompts to complete installation."
 }
@@ -123,12 +123,12 @@ proc connect-vpn {
     echo "Error: Tunnelblick is not installed"
     return 1
   }
-  
+
   echo "Connecting to feral VPN..."
-  
+
   # Use AppleScript to connect
   osascript -e 'tell application "Tunnelblick" to connect "feral"'
-  
+
   if (_status === 0) {
     echo "VPN connection initiated"
     return 0
@@ -147,12 +147,12 @@ proc disconnect-vpn {
     echo "Error: Tunnelblick is not installed"
     return 1
   }
-  
+
   echo "Disconnecting from feral VPN..."
-  
+
   # Use AppleScript to disconnect
   osascript -e 'tell application "Tunnelblick" to disconnect "feral"'
-  
+
   if (_status === 0) {
     echo "VPN disconnected"
     return 0
@@ -171,16 +171,16 @@ proc vpn-status {
     echo "Tunnelblick: Not installed"
     return 1
   }
-  
+
   echo "Tunnelblick: Installed"
-  
+
   # Check if Tunnelblick is running
   try {
     pgrep -x Tunnelblick > /dev/null
   }
   if (_status === 0) {
     echo "Tunnelblick: Running"
-    
+
     # Get connection state via AppleScript
     try {
       var state = $(osascript -e 'tell application "Tunnelblick" to get state of first configuration where name = "feral"' 2>/dev/null)
@@ -193,7 +193,7 @@ proc vpn-status {
   } else {
     echo "Tunnelblick: Not running"
   }
-  
+
   # Show current public IP
   echo ""
   echo "Current public IP:"

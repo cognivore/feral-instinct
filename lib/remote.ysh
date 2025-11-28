@@ -13,10 +13,10 @@ proc ssh-cmd (cmd) {
 proc check-vpn-status {
   # Check if VPN config exists on remote slot
   echo "Checking VPN configuration on $FERAL_HOST..."
-  
+
   var cmd = "test -d ~/$FERAL_VPN_PATH && ls ~/$FERAL_VPN_PATH"
   var result = $(ssh-cmd $cmd 2>&1)
-  
+
   if (_status === 0) {
     echo "VPN configs found:"
     echo $result
@@ -32,22 +32,22 @@ proc fetch-vpn-configs (local_dir) {
   # Download all VPN config files from FeralHosting slot
   # Args:
   #   local_dir: Local directory to save configs
-  
+
   if (local_dir === '') {
     echo "Error: local_dir argument required"
     return 1
   }
-  
+
   echo "Fetching VPN configs from $FERAL_USER@$FERAL_HOST:~/$FERAL_VPN_PATH/"
   echo "Destination: $local_dir"
-  
+
   # Ensure local directory exists
   mkdir -p $local_dir
-  
+
   # SCP all files from remote VPN directory
   var remote_path = "$FERAL_USER@$FERAL_HOST:$FERAL_VPN_PATH/*"
   scp -r $remote_path $local_dir/
-  
+
   if (_status === 0) {
     echo "Successfully downloaded VPN configuration files"
     ls -la $local_dir
@@ -61,14 +61,48 @@ proc fetch-vpn-configs (local_dir) {
 proc get-server-info {
   # Extract server info from remote config
   echo "Extracting server info from remote config..."
-  
+
   var cmd = "grep -E '^remote ' ~/$FERAL_VPN_PATH/client.ovpn"
   var server_line = $(ssh-cmd $cmd)
-  
+
   if (_status === 0) {
     echo "Server: $server_line"
   } else {
     echo "Could not extract server info"
     return 1
   }
+}
+
+proc patch-deprecated-options (config_file) {
+  # Update deprecated OpenVPN options to modern equivalents
+  # Fixes:
+  #   - ns-cert-type server → remote-cert-tls server
+  #   - comp-lzo → compress (backwards compatible negotiation)
+  
+  if (config_file === '') {
+    echo "Error: config_file argument required"
+    return 1
+  }
+  
+  echo "Patching deprecated OpenVPN options in $config_file..."
+  
+  # Create backup
+  cp $config_file "${config_file}.bak"
+  
+  # Use temp file approach for sed (macOS compatible)
+  var tmp_file = "${config_file}.tmp"
+  
+  # Replace ns-cert-type with remote-cert-tls
+  sed 's/^ns-cert-type server/remote-cert-tls server/' $config_file > $tmp_file
+  mv $tmp_file $config_file
+  
+  # Replace comp-lzo with compress (negotiates with server)
+  sed 's/^comp-lzo$/compress/' $config_file > $tmp_file
+  mv $tmp_file $config_file
+  
+  echo "Patched deprecated options:"
+  echo "  - ns-cert-type server → remote-cert-tls server"
+  echo "  - comp-lzo → compress"
+  echo ""
+  echo "Backup saved to: ${config_file}.bak"
 }

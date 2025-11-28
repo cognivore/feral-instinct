@@ -35,9 +35,9 @@ proc usage {
 proc cmd-setup {
   echo "=== Feral Instinct VPN Setup ==="
   echo ""
-  
+
   # Step 1: Check remote VPN config
-  echo "[1/4] Checking FeralHosting VPN configuration..."
+  echo "[1/5] Checking FeralHosting VPN configuration..."
   try {
     check-vpn-status
   }
@@ -45,9 +45,9 @@ proc cmd-setup {
     return 1
   }
   echo ""
-  
+
   # Step 2: Download configs
-  echo "[2/4] Downloading VPN configuration files..."
+  echo "[2/5] Downloading VPN configuration files..."
   mkdir -p $CONFIG_DIR
   try {
     fetch-vpn-configs $VPN_CONFIGS
@@ -56,9 +56,14 @@ proc cmd-setup {
     return 1
   }
   echo ""
-  
-  # Step 3: Ensure Tunnelblick is installed
-  echo "[3/4] Checking Tunnelblick installation..."
+
+  # Step 3: Patch deprecated OpenVPN options
+  echo "[3/5] Updating deprecated OpenVPN options..."
+  patch-deprecated-options "$VPN_CONFIGS/client.ovpn"
+  echo ""
+
+  # Step 4: Ensure Tunnelblick is installed
+  echo "[4/5] Checking Tunnelblick installation..."
   try {
     ensure-tunnelblick
   }
@@ -66,20 +71,20 @@ proc cmd-setup {
     return 1
   }
   echo ""
-  
-  # Step 4: Create and install bundle
-  echo "[4/4] Creating Tunnelblick configuration bundle..."
+
+  # Step 5: Create and install bundle
+  echo "[5/5] Creating Tunnelblick configuration bundle..."
   try {
     create-tblk-bundle $VPN_CONFIGS $CONFIG_DIR
   }
   if (_status !== 0) {
     return 1
   }
-  
+
   echo ""
   echo "Installing configuration to Tunnelblick..."
   install-config "$CONFIG_DIR/feral.tblk"
-  
+
   echo ""
   echo "=== Setup Complete ==="
   echo ""
@@ -120,7 +125,7 @@ case (command) {
   status     { cmd-status }
   check      { cmd-check }
   help | -h | --help { usage }
-  (else)     { 
+  (else)     {
     echo "Unknown command: $command"
     echo ""
     usage
