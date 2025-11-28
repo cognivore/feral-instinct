@@ -1,0 +1,22 @@
+# Rust specific ignores
+target/
+
+# Nix specific ignores
+.direnv/
+result/
+
+# Secrets
+**/conf/deployment.rs
+
+# Database
+db/*
+!db/dirty-sync.sh
+
+.vscode/
+
+*credentials.yaml
+infra/hostinger/priv/system-manager/result
+
+priv/aws/credentials
+
+.DS_Store

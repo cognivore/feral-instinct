@@ -1,0 +1,130 @@
+#!/usr/bin/env ysh
+# Feral Instinct - VPN configuration for FeralHosting
+#
+# Usage:
+#   feral-vpn setup     - Download configs and set up Tunnelblick
+#   feral-vpn connect   - Connect to VPN
+#   feral-vpn disconnect - Disconnect from VPN
+#   feral-vpn status    - Show connection status
+#   feral-vpn check     - Check remote VPN config
+
+# Determine script directory for relative imports
+var LIB_DIR = "$_this_dir/../lib"
+var CONFIG_DIR = "$[ENV.HOME]/.config/feral-instinct"
+var VPN_CONFIGS = "$CONFIG_DIR/vpn"
+
+# Source library modules
+source "$LIB_DIR/remote.ysh"
+source "$LIB_DIR/local.ysh"
+
+proc usage {
+  echo "Feral Instinct - VPN configuration for FeralHosting"
+  echo ""
+  echo "Usage: feral-vpn <command>"
+  echo ""
+  echo "Commands:"
+  echo "  setup       Download configs from FeralHosting and set up Tunnelblick"
+  echo "  connect     Connect to the feral VPN"
+  echo "  disconnect  Disconnect from the feral VPN"
+  echo "  status      Show VPN connection status and current IP"
+  echo "  check       Check if VPN is configured on FeralHosting slot"
+  echo ""
+  echo "Configuration stored in: $CONFIG_DIR"
+}
+
+proc cmd-setup {
+  echo "=== Feral Instinct VPN Setup ==="
+  echo ""
+  
+  # Step 1: Check remote VPN config
+  echo "[1/4] Checking FeralHosting VPN configuration..."
+  try {
+    check-vpn-status
+  }
+  if (_status !== 0) {
+    return 1
+  }
+  echo ""
+  
+  # Step 2: Download configs
+  echo "[2/4] Downloading VPN configuration files..."
+  mkdir -p $CONFIG_DIR
+  try {
+    fetch-vpn-configs $VPN_CONFIGS
+  }
+  if (_status !== 0) {
+    return 1
+  }
+  echo ""
+  
+  # Step 3: Ensure Tunnelblick is installed
+  echo "[3/4] Checking Tunnelblick installation..."
+  try {
+    ensure-tunnelblick
+  }
+  if (_status !== 0) {
+    return 1
+  }
+  echo ""
+  
+  # Step 4: Create and install bundle
+  echo "[4/4] Creating Tunnelblick configuration bundle..."
+  try {
+    create-tblk-bundle $VPN_CONFIGS $CONFIG_DIR
+  }
+  if (_status !== 0) {
+    return 1
+  }
+  
+  echo ""
+  echo "Installing configuration to Tunnelblick..."
+  install-config "$CONFIG_DIR/feral.tblk"
+  
+  echo ""
+  echo "=== Setup Complete ==="
+  echo ""
+  echo "Next steps:"
+  echo "  1. Accept the Tunnelblick configuration import"
+  echo "  2. Run 'feral-vpn connect' to connect to the VPN"
+  echo "  3. Verify with 'feral-vpn status'"
+}
+
+proc cmd-connect {
+  connect-vpn
+}
+
+proc cmd-disconnect {
+  disconnect-vpn
+}
+
+proc cmd-status {
+  vpn-status
+}
+
+proc cmd-check {
+  check-vpn-status
+}
+
+# Main entry point - use ARGV directly
+if (len(ARGV) === 0) {
+  usage
+  exit 1
+}
+
+var command = ARGV[0]
+
+case (command) {
+  setup      { cmd-setup }
+  connect    { cmd-connect }
+  disconnect { cmd-disconnect }
+  status     { cmd-status }
+  check      { cmd-check }
+  help | -h | --help { usage }
+  (else)     { 
+    echo "Unknown command: $command"
+    echo ""
+    usage
+    exit 1
+  }
+}
+

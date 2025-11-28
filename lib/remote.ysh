@@ -1,0 +1,74 @@
+#!/usr/bin/env ysh
+# Remote operations for FeralHosting VPN configuration
+
+const FERAL_HOST = 'styx.feralhosting.com'
+const FERAL_USER = 'j'
+const FERAL_VPN_PATH = 'private/vpn'
+
+proc ssh-cmd (cmd) {
+  # Execute command on FeralHosting slot
+  ssh "$FERAL_USER@$FERAL_HOST" $cmd
+}
+
+proc check-vpn-status {
+  # Check if VPN config exists on remote slot
+  echo "Checking VPN configuration on $FERAL_HOST..."
+  
+  var cmd = "test -d ~/$FERAL_VPN_PATH && ls ~/$FERAL_VPN_PATH"
+  var result = $(ssh-cmd $cmd 2>&1)
+  
+  if (_status === 0) {
+    echo "VPN configs found:"
+    echo $result
+    return 0
+  } else {
+    echo "No VPN configuration found at ~/$FERAL_VPN_PATH"
+    echo "Please enable OpenVPN via FeralHosting Manager first"
+    return 1
+  }
+}
+
+proc fetch-vpn-configs (local_dir) {
+  # Download all VPN config files from FeralHosting slot
+  # Args:
+  #   local_dir: Local directory to save configs
+  
+  if (local_dir === '') {
+    echo "Error: local_dir argument required"
+    return 1
+  }
+  
+  echo "Fetching VPN configs from $FERAL_USER@$FERAL_HOST:~/$FERAL_VPN_PATH/"
+  echo "Destination: $local_dir"
+  
+  # Ensure local directory exists
+  mkdir -p $local_dir
+  
+  # SCP all files from remote VPN directory
+  var remote_path = "$FERAL_USER@$FERAL_HOST:$FERAL_VPN_PATH/*"
+  scp -r $remote_path $local_dir/
+  
+  if (_status === 0) {
+    echo "Successfully downloaded VPN configuration files"
+    ls -la $local_dir
+    return 0
+  } else {
+    echo "Failed to download VPN configs"
+    return 1
+  }
+}
+
+proc get-server-info {
+  # Extract server info from remote config
+  echo "Extracting server info from remote config..."
+  
+  var cmd = "grep -E '^remote ' ~/$FERAL_VPN_PATH/client.ovpn"
+  var server_line = $(ssh-cmd $cmd)
+  
+  if (_status === 0) {
+    echo "Server: $server_line"
+  } else {
+    echo "Could not extract server info"
+    return 1
+  }
+}
