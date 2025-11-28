@@ -86,8 +86,12 @@ proc patch-deprecated-options (config_file) {
   
   echo "Patching deprecated OpenVPN options in $config_file..."
   
-  # Create backup
-  cp $config_file "${config_file}.bak"
+  # Create backup in home directory (not in config dir to avoid bundle pollution)
+  var backup_dir = "$[ENV.HOME]/.feral-instinct-backups"
+  mkdir -p $backup_dir
+  var timestamp = $(date +%Y%m%d-%H%M%S)
+  var backup_file = "$backup_dir/client.ovpn.$timestamp.bak"
+  cp $config_file $backup_file
   
   # Use temp file approach for sed (macOS compatible)
   var tmp_file = "${config_file}.tmp"
@@ -104,5 +108,5 @@ proc patch-deprecated-options (config_file) {
   echo "  - ns-cert-type server → remote-cert-tls server"
   echo "  - comp-lzo → compress"
   echo ""
-  echo "Backup saved to: ${config_file}.bak"
+  echo "Backup saved to: $backup_file"
 }

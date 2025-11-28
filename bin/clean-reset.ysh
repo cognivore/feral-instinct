@@ -1,0 +1,225 @@
+#!/usr/bin/env ysh
+# Clean reset - Completely reset VPN configuration from scratch
+#
+# This script:
+# 1. Gracefully terminates Tunnelblick
+# 2. Removes all local VPN configs
+# 3. Downloads fresh configs from FeralHosting
+# 4. Patches deprecated options
+# 5. Reinstalls to Tunnelblick
+# 6. Verifies connection works
+
+var LIB_DIR = "$_this_dir/../lib"
+var CONFIG_DIR = "$[ENV.HOME]/.config/feral-instinct"
+var VPN_CONFIGS = "$CONFIG_DIR/vpn"
+var BACKUP_DIR = "$[ENV.HOME]/.feral-instinct-backups"
+
+source "$LIB_DIR/remote.ysh"
+source "$LIB_DIR/local.ysh"
+
+proc step (num, total, msg) {
+  echo "[$num/$total] $msg"
+}
+
+proc terminate-tunnelblick {
+  echo "Checking if Tunnelblick is running..."
+  
+  try {
+    pgrep -x Tunnelblick > /dev/null
+  }
+  if (_status === 0) {
+    echo "Disconnecting any active VPN connections..."
+    try {
+      osascript -e 'tell application "Tunnelblick" to disconnect all' 2>/dev/null
+    }
+    
+    # Give it a moment to disconnect cleanly
+    sleep 2
+    
+    echo "Quitting Tunnelblick..."
+    try {
+      osascript -e 'tell application "Tunnelblick" to quit' 2>/dev/null
+    }
+    
+    # Wait for it to fully quit
+    sleep 2
+    
+    # Force kill if still running
+    try {
+      pgrep -x Tunnelblick > /dev/null
+    }
+    if (_status === 0) {
+      echo "Force killing Tunnelblick..."
+      pkill -x Tunnelblick
+      sleep 1
+    }
+    
+    echo "Tunnelblick terminated."
+  } else {
+    echo "Tunnelblick is not running."
+  }
+}
+
+proc clean-local-configs {
+  echo "Removing local VPN configurations..."
+  
+  # Remove our config directory
+  if test -d $CONFIG_DIR {
+    rm -rf $CONFIG_DIR
+    echo "  Removed: $CONFIG_DIR"
+  }
+  
+  # Remove Tunnelblick's feral configuration
+  var tb_configs = "$[ENV.HOME]/Library/Application Support/Tunnelblick/Configurations"
+  if test -d "$tb_configs/feral.tblk" {
+    rm -rf "$tb_configs/feral.tblk"
+    echo "  Removed: $tb_configs/feral.tblk"
+  }
+  
+  # Also check for any private configs
+  var tb_private = "$[ENV.HOME]/Library/Application Support/Tunnelblick/Users/$[ENV.USER]"
+  if test -d "$tb_private" {
+    try {
+      rm -rf "$tb_private/feral.tblk" 2>/dev/null
+    }
+  }
+  
+  echo "Local configs cleaned."
+}
+
+proc fresh-setup {
+  echo ""
+  step 1 6 "Checking FeralHosting VPN configuration..."
+  try {
+    check-vpn-status
+  }
+  if (_status !== 0) {
+    echo "ERROR: Cannot connect to FeralHosting or VPN not enabled."
+    echo "Make sure:"
+    echo "  1. You can SSH to the slot: ssh $FERAL_USER@$FERAL_HOST"
+    echo "  2. OpenVPN is enabled via FeralHosting Manager"
+    return 1
+  }
+  echo ""
+  
+  step 2 6 "Downloading fresh VPN configuration..."
+  mkdir -p $CONFIG_DIR
+  try {
+    fetch-vpn-configs $VPN_CONFIGS
+  }
+  if (_status !== 0) {
+    return 1
+  }
+  echo ""
+  
+  step 3 6 "Patching deprecated OpenVPN options..."
+  patch-deprecated-options "$VPN_CONFIGS/client.ovpn"
+  echo ""
+  
+  step 4 6 "Ensuring Tunnelblick is installed..."
+  try {
+    ensure-tunnelblick
+  }
+  if (_status !== 0) {
+    return 1
+  }
+  echo ""
+  
+  step 5 6 "Creating Tunnelblick configuration bundle..."
+  try {
+    create-tblk-bundle $VPN_CONFIGS $CONFIG_DIR
+  }
+  if (_status !== 0) {
+    return 1
+  }
+  echo ""
+  
+  step 6 6 "Installing configuration to Tunnelblick..."
+  install-config "$CONFIG_DIR/feral.tblk"
+  echo ""
+}
+
+proc verify-connection {
+  echo "Waiting for Tunnelblick to start and import config..."
+  echo "(Please accept any Tunnelblick prompts that appear)"
+  echo ""
+  
+  # Wait for user to accept the config
+  var max_wait = 60
+  var waited = 0
+  
+  while (waited < max_wait) {
+    sleep 5
+    setvar waited = waited + 5
+    
+    try {
+      var state = $(osascript -e 'tell application "Tunnelblick" to get state of first configuration where name = "feral"' 2>/dev/null)
+    }
+    if (_status === 0) {
+      echo "Configuration imported successfully!"
+      echo "Attempting to connect..."
+      
+      osascript -e 'tell application "Tunnelblick" to connect "feral"'
+      sleep 5
+      
+      # Check if connected
+      var final_state = $(osascript -e 'tell application "Tunnelblick" to get state of first configuration where name = "feral"' 2>/dev/null)
+      
+      if (final_state === 'CONNECTED') {
+        echo ""
+        echo "=== SUCCESS ==="
+        echo "VPN is connected!"
+        echo ""
+        echo "Current public IP:"
+        curl -s https://ifconfig.me && echo ""
+        return 0
+      } else {
+        echo "Connection state: $final_state"
+        echo "You may need to manually connect via Tunnelblick menu."
+      }
+      return 0
+    }
+    
+    echo "  Waiting... ($waited/$max_wait seconds)"
+  }
+  
+  echo ""
+  echo "Timeout waiting for config import."
+  echo "Please manually import the config from: $CONFIG_DIR/feral.tblk"
+  return 1
+}
+
+# Main
+echo "========================================"
+echo "  Feral Instinct - Clean Reset"
+echo "========================================"
+echo ""
+echo "This will completely reset your VPN configuration."
+echo ""
+
+step 1 4 "Terminating Tunnelblick..."
+terminate-tunnelblick
+echo ""
+
+step 2 4 "Cleaning local configurations..."
+clean-local-configs
+echo ""
+
+step 3 4 "Setting up fresh configuration..."
+try {
+  fresh-setup
+}
+if (_status !== 0) {
+  echo ""
+  echo "Setup failed. Please check the errors above."
+  exit 1
+}
+
+step 4 4 "Verifying connection..."
+verify-connection
+
+echo ""
+echo "========================================"
+echo "  Clean Reset Complete"
+echo "========================================"
+
