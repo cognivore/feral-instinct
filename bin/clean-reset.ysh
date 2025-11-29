@@ -23,7 +23,7 @@ proc step (num, total, msg) {
 
 proc terminate-tunnelblick {
   echo "Checking if Tunnelblick is running..."
-  
+
   try {
     pgrep -x Tunnelblick > /dev/null
   }
@@ -32,50 +32,71 @@ proc terminate-tunnelblick {
     try {
       osascript -e 'tell application "Tunnelblick" to disconnect all' 2>/dev/null
     }
-    
-    # Give it a moment to disconnect cleanly
-    sleep 2
-    
+
+    # Give it time to disconnect cleanly
+    sleep 3
+
     echo "Quitting Tunnelblick..."
     try {
       osascript -e 'tell application "Tunnelblick" to quit' 2>/dev/null
     }
-    
-    # Wait for it to fully quit
-    sleep 2
-    
+
+    # Wait for it to fully quit (important for releasing file handles)
+    sleep 3
+
     # Force kill if still running
     try {
       pgrep -x Tunnelblick > /dev/null
     }
     if (_status === 0) {
       echo "Force killing Tunnelblick..."
-      pkill -x Tunnelblick
-      sleep 1
+      pkill -9 -x Tunnelblick
+      sleep 2
     }
-    
+
+    # Also kill any lingering openvpn processes
+    try {
+      pkill -9 -f "openvpn.*feral" 2>/dev/null
+    }
+
     echo "Tunnelblick terminated."
   } else {
     echo "Tunnelblick is not running."
   }
+
+  # Extra wait to ensure all processes are gone
+  sleep 2
 }
 
 proc clean-local-configs {
   echo "Removing local VPN configurations..."
-  
+
+  # IMPORTANT: cd to home first to avoid "getcwd: cannot access parent directories" errors
+  # This happens if we're in a directory that gets deleted
+  cd $[ENV.HOME]
+
   # Remove our config directory
   if test -d $CONFIG_DIR {
     rm -rf $CONFIG_DIR
     echo "  Removed: $CONFIG_DIR"
   }
-  
-  # Remove Tunnelblick's feral configuration
+
+  # Remove Tunnelblick's feral configuration (Shared location)
+  var tb_shared = "/Library/Application Support/Tunnelblick/Shared"
+  if test -d "$tb_shared/feral.tblk" {
+    try {
+      sudo rm -rf "$tb_shared/feral.tblk" 2>/dev/null
+    }
+    echo "  Removed: $tb_shared/feral.tblk"
+  }
+
+  # Remove from user Configurations
   var tb_configs = "$[ENV.HOME]/Library/Application Support/Tunnelblick/Configurations"
   if test -d "$tb_configs/feral.tblk" {
     rm -rf "$tb_configs/feral.tblk"
     echo "  Removed: $tb_configs/feral.tblk"
   }
-  
+
   # Also check for any private configs
   var tb_private = "$[ENV.HOME]/Library/Application Support/Tunnelblick/Users/$[ENV.USER]"
   if test -d "$tb_private" {
@@ -83,17 +104,21 @@ proc clean-local-configs {
       rm -rf "$tb_private/feral.tblk" 2>/dev/null
     }
   }
-  
+
+  # Give Tunnelblick time to fully release any file handles
+  sleep 2
+
   echo "Local configs cleaned."
 }
 
 proc fresh-setup {
   echo ""
   step 1 6 "Checking FeralHosting VPN configuration..."
-  try {
-    check-vpn-status
-  }
-  if (_status !== 0) {
+
+  check-vpn-status
+  var check_result = _status
+
+  if (check_result !== 0) {
     echo "ERROR: Cannot connect to FeralHosting or VPN not enabled."
     echo "Make sure:"
     echo "  1. You can SSH to the slot: ssh $FERAL_USER@$FERAL_HOST"
@@ -101,7 +126,7 @@ proc fresh-setup {
     return 1
   }
   echo ""
-  
+
   step 2 6 "Downloading fresh VPN configuration..."
   mkdir -p $CONFIG_DIR
   try {
@@ -111,11 +136,11 @@ proc fresh-setup {
     return 1
   }
   echo ""
-  
+
   step 3 6 "Patching deprecated OpenVPN options..."
   patch-deprecated-options "$VPN_CONFIGS/client.ovpn"
   echo ""
-  
+
   step 4 6 "Ensuring Tunnelblick is installed..."
   try {
     ensure-tunnelblick
@@ -124,7 +149,7 @@ proc fresh-setup {
     return 1
   }
   echo ""
-  
+
   step 5 6 "Creating Tunnelblick configuration bundle..."
   try {
     create-tblk-bundle $VPN_CONFIGS $CONFIG_DIR
@@ -133,7 +158,7 @@ proc fresh-setup {
     return 1
   }
   echo ""
-  
+
   step 6 6 "Installing configuration to Tunnelblick..."
   install-config "$CONFIG_DIR/feral.tblk"
   echo ""
@@ -143,28 +168,28 @@ proc verify-connection {
   echo "Waiting for Tunnelblick to start and import config..."
   echo "(Please accept any Tunnelblick prompts that appear)"
   echo ""
-  
+
   # Wait for user to accept the config
   var max_wait = 60
   var waited = 0
-  
+
   while (waited < max_wait) {
     sleep 5
     setvar waited = waited + 5
-    
+
     try {
       var state = $(osascript -e 'tell application "Tunnelblick" to get state of first configuration where name = "feral"' 2>/dev/null)
     }
     if (_status === 0) {
       echo "Configuration imported successfully!"
       echo "Attempting to connect..."
-      
+
       osascript -e 'tell application "Tunnelblick" to connect "feral"'
       sleep 5
-      
+
       # Check if connected
       var final_state = $(osascript -e 'tell application "Tunnelblick" to get state of first configuration where name = "feral"' 2>/dev/null)
-      
+
       if (final_state === 'CONNECTED') {
         echo ""
         echo "=== SUCCESS ==="
@@ -179,10 +204,10 @@ proc verify-connection {
       }
       return 0
     }
-    
+
     echo "  Waiting... ($waited/$max_wait seconds)"
   }
-  
+
   echo ""
   echo "Timeout waiting for config import."
   echo "Please manually import the config from: $CONFIG_DIR/feral.tblk"

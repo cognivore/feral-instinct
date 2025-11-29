@@ -14,18 +14,21 @@ proc check-vpn-status {
   # Check if VPN config exists on remote slot
   echo "Checking VPN configuration on $FERAL_HOST..."
 
-  var cmd = "test -d ~/$FERAL_VPN_PATH && ls ~/$FERAL_VPN_PATH"
-  var result = $(ssh-cmd $cmd 2>&1)
+  # Use direct SSH to avoid YSH proc issues with complex commands
+  var remote = "$FERAL_USER@$FERAL_HOST"
 
-  if (_status === 0) {
-    echo "VPN configs found:"
-    echo $result
-    return 0
-  } else {
+  try {
+    ssh $remote "test -d ~/$FERAL_VPN_PATH"
+  }
+  if (_status !== 0) {
     echo "No VPN configuration found at ~/$FERAL_VPN_PATH"
     echo "Please enable OpenVPN via FeralHosting Manager first"
     return 1
   }
+
+  var result = $(ssh $remote "ls ~/$FERAL_VPN_PATH")
+  echo "VPN configs found:"
+  echo $result
 }
 
 proc fetch-vpn-configs (local_dir) {
@@ -78,35 +81,62 @@ proc patch-deprecated-options (config_file) {
   # Fixes:
   #   - ns-cert-type server → remote-cert-tls server
   #   - comp-lzo → compress (backwards compatible negotiation)
-  
+
   if (config_file === '') {
     echo "Error: config_file argument required"
     return 1
   }
-  
+
   echo "Patching deprecated OpenVPN options in $config_file..."
-  
+
   # Create backup in home directory (not in config dir to avoid bundle pollution)
   var backup_dir = "$[ENV.HOME]/.feral-instinct-backups"
   mkdir -p $backup_dir
   var timestamp = $(date +%Y%m%d-%H%M%S)
   var backup_file = "$backup_dir/client.ovpn.$timestamp.bak"
   cp $config_file $backup_file
-  
+
   # Use temp file approach for sed (macOS compatible)
   var tmp_file = "${config_file}.tmp"
-  
+
   # Replace ns-cert-type with remote-cert-tls
   sed 's/^ns-cert-type server/remote-cert-tls server/' $config_file > $tmp_file
   mv $tmp_file $config_file
-  
-  # Replace comp-lzo with compress (negotiates with server)
-  sed 's/^comp-lzo$/compress/' $config_file > $tmp_file
+
+  # Remove comp-lzo entirely (deprecated in 2.4, and 'compress' is also deprecated in 2.5)
+  sed '/^comp-lzo$/d' $config_file > $tmp_file
   mv $tmp_file $config_file
-  
-  echo "Patched deprecated options:"
+
+  # Also remove any 'compress' line if present
+  sed '/^compress$/d' $config_file > $tmp_file
+  mv $tmp_file $config_file
+
+  # Check if we've already added our settings (idempotency)
+  try {
+    grep -q '# feral-instinct patches' $config_file
+  }
+  if (_status !== 0) {
+    echo "" >> $config_file
+    echo "# feral-instinct patches" >> $config_file
+
+    # Modern cipher settings to avoid OpenVPN 2.5+ warnings
+    echo "data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305" >> $config_file
+    echo "data-ciphers-fallback AES-256-CBC" >> $config_file
+
+    # MTU fixes - critical for many networks
+    # Reduces MTU to prevent fragmentation issues
+    echo "tun-mtu 1400" >> $config_file
+    echo "mssfix 1360" >> $config_file
+
+    # Fragment large packets
+    echo "fragment 1300" >> $config_file
+  }
+
+  echo "Patched config:"
   echo "  - ns-cert-type server → remote-cert-tls server"
-  echo "  - comp-lzo → compress"
+  echo "  - Removed deprecated compression options"
+  echo "  - Added modern cipher settings"
+  echo "  - Added MTU/fragmentation fixes (tun-mtu 1400, mssfix 1360)"
   echo ""
   echo "Backup saved to: $backup_file"
 }
