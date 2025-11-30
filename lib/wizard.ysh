@@ -1,0 +1,541 @@
+#!/usr/bin/env ysh
+# Interactive setup wizard for provider account registration
+
+# Source guard
+if test -n "${_WIZARD_SOURCED:-}" {
+  return 0
+}
+setglobal _WIZARD_SOURCED = "1"
+
+# Determine lib directory for cross-library sourcing
+var _lib_dir = "${WG_MESH_LIB:-$_this_dir}"
+
+source "$_lib_dir/passveil.ysh"
+source "$_lib_dir/tui.ysh"
+
+# Check if we can use TUI (gum available)
+var USE_TUI = false
+if command -v gum >/dev/null 2>&1 {
+  setvar USE_TUI = true
+}
+
+# ANSI colors for pretty output (fallback when gum unavailable)
+const COLOR_GREEN = $'\e[32m'
+const COLOR_YELLOW = $'\e[33m'
+const COLOR_BLUE = $'\e[34m'
+const COLOR_CYAN = $'\e[36m'
+const COLOR_BOLD = $'\e[1m'
+const COLOR_RESET = $'\e[0m'
+
+# Provider configurations
+const PROVIDERS = {
+  ramnode: {
+    name: "RamNode",
+    domain: "ramnode.com",
+    signup_url: "https://clientarea.ramnode.com/register.php",
+    api_url: null,
+    api_dashboard: "https://clientarea.ramnode.com/clientarea.php",
+    locations: ["Seattle (US)", "NYC (US)", "Los Angeles (US)", "Atlanta (US)"],
+    has_api: false
+  },
+  flokinet: {
+    name: "FlokiNET",
+    domain: "flokinet.is",
+    signup_url: "https://billing.flokinet.is/register.php",
+    api_url: null,
+    api_dashboard: "https://billing.flokinet.is/clientarea.php",
+    locations: ["Finland", "Netherlands", "Iceland", "Romania"],
+    has_api: false
+  }
+}
+
+# Available mesh node locations
+const MESH_LOCATIONS = {
+  'ramnode-sea': {
+    name: "Seattle",
+    provider: "ramnode",
+    region: "US West",
+    price: '~$5/mo',
+    description: "RamNode Seattle - US West Coast"
+  },
+  'ramnode-nyc': {
+    name: "New York",
+    provider: "ramnode",
+    region: "US East",
+    price: '~$5/mo',
+    description: "RamNode NYC - US East Coast"
+  },
+  'ramnode-la': {
+    name: "Los Angeles",
+    provider: "ramnode",
+    region: "US West",
+    price: '~$5/mo',
+    description: "RamNode LA - US West Coast"
+  },
+  'ramnode-atl': {
+    name: "Atlanta",
+    provider: "ramnode",
+    region: "US South",
+    price: '~$5/mo',
+    description: "RamNode Atlanta - US South"
+  },
+  'flokinet-fi': {
+    name: "Finland",
+    provider: "flokinet",
+    region: "Nordic",
+    price: '~€5-8/mo',
+    description: "FlokiNET Finland - Privacy-focused Nordic"
+  },
+  'flokinet-nl': {
+    name: "Netherlands",
+    provider: "flokinet",
+    region: "EU West",
+    price: '~€5-8/mo',
+    description: "FlokiNET Netherlands - EU West"
+  },
+  'flokinet-is': {
+    name: "Iceland",
+    provider: "flokinet",
+    region: "Nordic",
+    price: '~€5-8/mo',
+    description: "FlokiNET Iceland - Privacy haven"
+  },
+  'flokinet-ro': {
+    name: "Romania",
+    provider: "flokinet",
+    region: "EU East",
+    price: '~€5-8/mo',
+    description: "FlokiNET Romania - EU East, DMCA-ignored"
+  }
+}
+
+# TUI-based location selector
+# Returns selected location keys (one per line) on STDOUT
+# Decorative output goes to STDERR so it's not captured
+proc select-locations-tui {
+  if ! $USE_TUI {
+    # Fallback to simple selection
+    select-locations-simple
+    return
+  }
+
+  # Send decorative output to stderr (not captured by $())
+  tui-header "Select VPS Locations for Mesh" >&2
+
+  # Show location details to user (on stderr)
+  echo "" >&2
+  echo "Available locations:" >&2
+  echo "  ramnode-sea  │ Seattle      │ US West    │ RamNode  │ ~\$5/mo" >&2
+  echo "  ramnode-nyc  │ New York     │ US East    │ RamNode  │ ~\$5/mo" >&2
+  echo "  ramnode-la   │ Los Angeles  │ US West    │ RamNode  │ ~\$5/mo" >&2
+  echo "  ramnode-atl  │ Atlanta      │ US South   │ RamNode  │ ~\$5/mo" >&2
+  echo "  flokinet-fi  │ Finland      │ Nordic     │ FlokiNET │ ~€5-8/mo" >&2
+  echo "  flokinet-nl  │ Netherlands  │ EU West    │ FlokiNET │ ~€5-8/mo" >&2
+  echo "  flokinet-is  │ Iceland      │ Nordic     │ FlokiNET │ ~€5-8/mo" >&2
+  echo "  flokinet-ro  │ Romania      │ EU East    │ FlokiNET │ ~€5-8/mo" >&2
+  echo "" >&2
+
+  # gum choose displays UI on stderr, returns selection on stdout
+  var selected = $(gum choose --no-limit \
+    --cursor.foreground 212 \
+    --selected.foreground 82 \
+    --header "Select locations (SPACE to toggle, ENTER to confirm):" \
+    "ramnode-sea" \
+    "ramnode-nyc" \
+    "ramnode-la" \
+    "ramnode-atl" \
+    "flokinet-fi" \
+    "flokinet-nl" \
+    "flokinet-is" \
+    "flokinet-ro")
+
+  if test -z "$selected" {
+    return 1
+  }
+
+  # Output clean location keys (one per line)
+  echo "$selected"
+}
+
+# Simple fallback location selector (no TUI)
+# Returns location keys on stdout, prompts on stderr
+proc select-locations-simple {
+  print-header "Select VPS Locations for Mesh" >&2
+
+  echo "Available locations:" >&2
+  echo "  1) ramnode-sea  - Seattle (US West) - RamNode ~\$5/mo" >&2
+  echo "  2) ramnode-nyc  - New York (US East) - RamNode ~\$5/mo" >&2
+  echo "  3) ramnode-la   - Los Angeles (US West) - RamNode ~\$5/mo" >&2
+  echo "  4) ramnode-atl  - Atlanta (US South) - RamNode ~\$5/mo" >&2
+  echo "  5) flokinet-fi  - Finland (Nordic) - FlokiNET ~€5-8/mo" >&2
+  echo "  6) flokinet-nl  - Netherlands (EU West) - FlokiNET ~€5-8/mo" >&2
+  echo "  7) flokinet-is  - Iceland (Nordic) - FlokiNET ~€5-8/mo" >&2
+  echo "  8) flokinet-ro  - Romania (EU East) - FlokiNET ~€5-8/mo" >&2
+  echo "" >&2
+  echo "Enter location numbers separated by spaces (e.g., '1 5 8'):" >&2
+
+  var input = ''
+  read -r input
+
+  var result = []
+  for num in (input) {
+    case (num) {
+      1 { append 'ramnode-sea' (result) }
+      2 { append 'ramnode-nyc' (result) }
+      3 { append 'ramnode-la' (result) }
+      4 { append 'ramnode-atl' (result) }
+      5 { append 'flokinet-fi' (result) }
+      6 { append 'flokinet-nl' (result) }
+      7 { append 'flokinet-is' (result) }
+      8 { append 'flokinet-ro' (result) }
+    }
+  }
+
+  # Output location keys to stdout
+  for loc in (result) {
+    echo $loc
+  }
+}
+
+# Get required providers from selected locations
+proc get-providers-for-locations {
+  var providers = {}
+  while read -r loc {
+    if test -n "$loc" {
+      case (loc) {
+        ramnode-* { setvar providers['ramnode'] = true }
+        flokinet-* { setvar providers['flokinet'] = true }
+      }
+    }
+  }
+  for p in (providers) {
+    echo $p
+  }
+}
+
+# Open URL in default browser (cross-platform)
+proc open-url (url) {
+  var os = $(uname)
+  case $os in
+    (Darwin)
+      open $url
+      ;;
+    (*)
+      if command -v xdg-open >/dev/null {
+        xdg-open $url
+      } else {
+        echo "Please open this URL manually: $url"
+      }
+      ;;
+  esac
+}
+
+# Print a styled header
+proc print-header (text) {
+  echo ""
+  echo "${COLOR_BOLD}${COLOR_CYAN}════════════════════════════════════════════════════════════${COLOR_RESET}"
+  echo "${COLOR_BOLD}${COLOR_CYAN}  $text${COLOR_RESET}"
+  echo "${COLOR_BOLD}${COLOR_CYAN}════════════════════════════════════════════════════════════${COLOR_RESET}"
+  echo ""
+}
+
+# Print a step indicator
+proc print-step (num, total, text) {
+  echo "${COLOR_BOLD}${COLOR_BLUE}[$num/$total]${COLOR_RESET} $text"
+}
+
+# Print success message
+proc print-success (text) {
+  echo "${COLOR_GREEN}✓${COLOR_RESET} $text"
+}
+
+# Print info message
+proc print-info (text) {
+  echo "${COLOR_YELLOW}→${COLOR_RESET} $text"
+}
+
+# Prompt user and wait for input
+proc prompt-input (prompt_text) {
+  echo -n "${COLOR_BOLD}$prompt_text${COLOR_RESET} "
+  var input = ''
+  read -r input
+  echo $input
+}
+
+# Prompt for confirmation (y/n)
+proc prompt-confirm (prompt_text) {
+  while true {
+    var answer = $(prompt-input "$prompt_text [y/n]:")
+    case (answer) {
+      y|Y|yes|Yes|YES { return 0 }
+      n|N|no|No|NO { return 1 }
+      (else) { echo "Please answer y or n" }
+    }
+  }
+}
+
+# Wait for user to press enter
+proc wait-for-enter (message="Press Enter to continue...") {
+  echo ""
+  echo -n "${COLOR_YELLOW}$message${COLOR_RESET}"
+  read -r
+}
+
+# Setup account for a single provider
+proc setup-provider-account (provider_key) {
+  var provider = PROVIDERS[provider_key]
+  var provider_name = provider['name']
+  var domain = provider['domain']
+  var signup_url = provider['signup_url']
+  var api_dashboard = provider['api_dashboard']
+  var has_api = provider['has_api']
+
+  print-header "Setting up $provider_name Account"
+
+  # Check if already configured
+  var existing = $(passveil-list "$domain/")
+  if (existing !== '') {
+    print-info "Found existing credentials for $domain"
+    try {
+      prompt-confirm "Do you want to reconfigure?"
+    }
+    if (_status !== 0) {
+      echo "Skipping $provider_name setup."
+      return 0
+    }
+  }
+
+  # Step 1: Open signup page
+  print-step 1 4 "Opening $provider_name registration page..."
+  print-info "URL: $signup_url"
+  open-url $signup_url
+
+  wait-for-enter "Complete registration in your browser, then press Enter..."
+
+  # Step 2: Get email/username
+  print-step 2 4 "Recording account credentials..."
+  var email = $(prompt-input "Enter the email you registered with:")
+
+  if (email === '') {
+    echo "Error: Email cannot be empty"
+    return 1
+  }
+
+  # Step 3: Generate and store password
+  print-step 3 4 "Generating secure password..."
+  var pass_path = "$domain/$email"
+
+  var password = $(passveil-generate $pass_path)
+  if (_status !== 0) {
+    echo "Error: Failed to generate password"
+    return 1
+  }
+
+  echo ""
+  echo "${COLOR_BOLD}Your generated password:${COLOR_RESET}"
+  echo ""
+  echo "  ${COLOR_GREEN}$password${COLOR_RESET}"
+  echo ""
+  print-info "This password has been stored in passveil at: $pass_path"
+  print-info "Use this password when setting up your account on the website."
+
+  wait-for-enter "Set this password on the website, then press Enter..."
+
+  # Step 4: API key (if provider has API)
+  if (has_api) {
+    print-step 4 4 "Setting up API access..."
+    print-info "Opening API/Security settings page..."
+    open-url $api_dashboard
+
+    wait-for-enter "Generate an API key on the website, then press Enter..."
+
+    var api_key = $(prompt-input "Paste your API key here:")
+
+    if (api_key !== '') {
+      var api_path = "$domain/$email/api"
+      passveil-store $api_path $api_key
+
+      if (_status === 0) {
+        print-success "API key stored at: $api_path"
+      } else {
+        echo "Warning: Failed to store API key"
+      }
+    } else {
+      print-info "No API key provided. You can add it later with:"
+      echo "  passveil insert $domain/$email/api"
+    }
+  } else {
+    print-step 4 4 "API setup (skipped - $provider_name uses manual provisioning)"
+    print-info "$provider_name does not have a public API."
+    print-info "VPS provisioning will be done via their web panel."
+  }
+
+  print-success "$provider_name account setup complete!"
+  return 0
+}
+
+# Run the full setup wizard
+proc run-setup-wizard {
+  if $USE_TUI {
+    tui-header "WireGuard Mesh Setup Wizard"
+  } else {
+    print-header "WireGuard Mesh Setup Wizard"
+  }
+
+  echo "This wizard will help you set up accounts with VPS providers"
+  echo "for your multi-geo WireGuard mesh VPN."
+  echo ""
+
+  # Step 1: Select locations via TUI
+  echo "First, let's select which locations you want in your mesh."
+  echo ""
+
+  var selected_locations = []
+  var loc_output = $(select-locations-tui)
+  if test -z "$loc_output" {
+    echo "No locations selected. Exiting wizard."
+    return 1
+  }
+
+  # Parse selected locations - use for loop to avoid subshell issues
+  # Split by newlines and add to array
+  var newline = $'\n'
+  for loc in (loc_output.split(newline)) {
+    if (loc !== '') {
+      append $loc (selected_locations)
+    }
+  }
+
+  if (len(selected_locations) === 0) {
+    echo "No locations selected. Exiting wizard."
+    return 1
+  }
+
+  # Store selected locations for later use
+  var home = ENV.HOME
+  var locations_file = "$home/.config/wg-mesh/selected-locations"
+  mkdir -p "$home/.config/wg-mesh"
+  printf '%s\n' @selected_locations > "$locations_file"
+
+  echo ""
+  var num_locs = len(selected_locations)
+  if $USE_TUI {
+    tui-success "Selected $num_locs location(s):"
+  } else {
+    print-success "Selected $num_locs location(s):"
+  }
+  for loc in (selected_locations) {
+    var loc_info = MESH_LOCATIONS[loc]
+    var desc = loc_info['description']
+    echo "  • $desc"
+  }
+  echo ""
+
+  # Determine which providers we need
+  var needed_providers = {}
+  for loc in (selected_locations) {
+    var prov_info = MESH_LOCATIONS[loc]
+    var prov_name = prov_info['provider']
+    setvar needed_providers[prov_name] = true
+  }
+
+  # Convert to list
+  var provider_keys = []
+  for p in (needed_providers) {
+    append $p (provider_keys)
+  }
+
+  var providers_str = join(provider_keys, ', ')
+  echo "Providers to configure: $providers_str"
+  echo ""
+
+  if $USE_TUI {
+    if ! gum confirm "Ready to set up provider accounts?" {
+      echo "Setup cancelled."
+      return 1
+    }
+  } else {
+    try {
+      prompt-confirm "Ready to set up provider accounts?"
+    }
+    if (_status !== 0) {
+      echo "Setup cancelled."
+      return 1
+    }
+  }
+
+  # Setup each required provider
+  var total = len(provider_keys)
+  var current = 1
+
+  for key in (provider_keys) {
+    echo ""
+    if $USE_TUI {
+      tui-step $current $total "Setting up $key..."
+    } else {
+      echo "${COLOR_BOLD}Provider $current of $total${COLOR_RESET}"
+    }
+    setup-provider-account $key
+    setvar current = current + 1
+  }
+
+  if $USE_TUI {
+    tui-header "Setup Wizard Complete!"
+  } else {
+    print-header "Setup Wizard Complete!"
+  }
+
+  echo "Your provider accounts are configured."
+  echo "Selected locations saved to: $locations_file"
+  echo ""
+  echo "Next steps:"
+  echo "  1. Fund your accounts at each provider"
+  echo "  2. Run 'wg-setup.ysh provision' to create VPS instances"
+  echo "  3. Run 'wg-setup.ysh deploy' to configure WireGuard mesh"
+  echo ""
+
+  return 0
+}
+
+# Get the previously selected locations
+proc get-selected-locations {
+  var home = ENV.HOME
+  var locations_file = "$home/.config/wg-mesh/selected-locations"
+  if test -f "$locations_file" {
+    cat "$locations_file"
+  } else {
+    # Default to recommended locations (one US, one EU)
+    echo "ramnode-sea"
+    echo "flokinet-fi"
+  }
+}
+
+# Show current configuration status
+proc show-config-status {
+  print-header "Configuration Status"
+
+  for key in (PROVIDERS) {
+    var p = PROVIDERS[key]
+    var domain = p['domain']
+    var pname = p['name']
+    echo "${COLOR_BOLD}${pname}${COLOR_RESET} ($domain)"
+
+    var creds = $(passveil-list "$domain/")
+    if (creds === '') {
+      echo "  ${COLOR_YELLOW}✗ Not configured${COLOR_RESET}"
+    } else {
+      echo "  ${COLOR_GREEN}✓ Credentials found${COLOR_RESET}"
+      # Check for API key
+      try {
+        passveil-exists "$domain/*/api"
+      }
+      if (_status === 0) {
+        echo "  ${COLOR_GREEN}✓ API key configured${COLOR_RESET}"
+      } else {
+        echo "  ${COLOR_YELLOW}○ No API key${COLOR_RESET}"
+      }
+    }
+    echo ""
+  }
+}
+

@@ -1,204 +1,352 @@
-# Feral Instinct
+# WireGuard Mesh
 
-Automated VPN configuration for FeralHosting slots using YSH (Oils shell) and Tunnelblick on macOS.
+A self-sovereign, multi-geo WireGuard VPN mesh built with YSH (Oils shell) and passveil for secrets management. Features a beautiful TUI powered by [gum](https://github.com/charmbracelet/gum).
 
-## What This Does
+## Installation
 
-This tool automates the entire process of setting up a VPN connection to your FeralHosting seedbox slot:
+### Option 1: Nix Profile (Recommended)
 
-1. Downloads OpenVPN configuration from your FeralHosting slot
-2. Patches deprecated OpenVPN options for modern Tunnelblick compatibility
-3. Creates and installs a Tunnelblick configuration bundle
-4. Manages VPN connections via command line
+```bash
+# Install directly from the flake
+nix profile install github:cognivore/wireguard-mesh
+
+# Then use commands directly:
+wg-mesh wizard       # Setup wizard
+wg-switch           # TUI route switcher
+wg-connect          # Connect to VPN
+wg-status           # Show status
+```
+
+### Option 2: Development Shell
+
+```bash
+git clone https://github.com/cognivore/wireguard-mesh.git
+cd wireguard-mesh
+nix develop         # or: direnv allow
+ysh bin/wg-setup.ysh wizard
+```
+
+## Architecture
+
+```
+    ┌─────────────┐         ┌─────────────┐
+    │ RamNode SEA │─────────│ RamNode NYC │
+    │ (Seattle)   │    ╲    │ (New York)  │
+    └──────┬──────┘     ╲   └──────┬──────┘
+           │             ╲         │
+           │              ╲        │
+           │               ╲       │
+    ┌──────┴──────┐    ┌────╲─────┴┐
+    │ Flokinet FI │────│ Flokinet NL│
+    │ (Finland)   │    │ (Netherlands)│
+    └─────────────┘    └─────────────┘
+
+     Up to 8 nodes, full mesh WireGuard tunnels
+```
+
+## Why This Exists
+
+Instead of relying on a single VPN provider that may have:
+- Broken NAT routing (looking at you, Feral)
+- Overcrowded IP ranges that get blocked
+- Limited geographic options
+
+...this project lets you build your own multi-geo VPN mesh using privacy-friendly VPS providers.
+
+## Features
+
+- **Multi-geo**: US (Seattle, NYC, LA, Atlanta), EU (Netherlands, Romania), Nordic (Finland, Iceland)
+- **Full mesh**: Every node connects to every other node
+- **Privacy-first providers**: RamNode (US) and FlokiNET (EU/Nordic)
+- **Beautiful TUI**: Interactive menus with arrow key navigation (powered by gum)
+- **Automated setup**: Interactive wizard for account creation
+- **Secrets management**: All credentials stored in passveil
+- **Split or full tunnel**: Route all traffic or just mesh traffic
+- **Quick route switching**: TUI to instantly switch between VPN nodes
+- **Nix-installable**: Install once, use anywhere (`nix profile install`)
 
 ## Prerequisites
 
-- macOS
 - [Nix package manager](https://nixos.org/download.html) with flakes enabled
-- A FeralHosting slot with SSH access
-- OpenVPN enabled on your FeralHosting slot
+- SSH key pair for server access
+- Accounts at VPS providers (wizard helps set these up)
 
-## End-to-End Setup Guide
-
-### Step 1: Purchase a FeralHosting Slot
-
-1. Go to [feralhosting.com](https://www.feralhosting.com)
-2. Choose a plan and complete purchase
-3. Wait for your slot to be provisioned (usually takes a few minutes)
-4. Note your slot details from the welcome email:
-   - Server hostname (e.g., `styx.feralhosting.com`)
-   - Username (e.g., `j`)
-
-### Step 2: Enable OpenVPN on Your Slot
-
-1. Log into the [FeralHosting Manager](https://www.feralhosting.com/manager/)
-2. Navigate to your slot
-3. Go to **Software** → **OpenVPN**
-4. Click **Install** or **Enable**
-5. Wait for installation to complete
-6. The OpenVPN configuration will be created at `~/private/vpn/client.ovpn` on your slot
-
-### Step 3: Set Up SSH Key Authentication
-
-On your local Mac, set up passwordless SSH access to your slot:
-
-```bash
-# Generate SSH key if you don't have one
-ssh-keygen -t ed25519 -C "your_email@example.com"
-
-# Copy your public key to the FeralHosting slot
-ssh-copy-id USERNAME@SERVER.feralhosting.com
-
-# Test the connection (should not ask for password)
-ssh USERNAME@SERVER.feralhosting.com
-```
-
-Replace `USERNAME` and `SERVER` with your actual slot details.
-
-### Step 4: Clone and Configure This Repository
+## Quick Start
 
 ```bash
 # Clone the repository
-git clone https://github.com/cognivore/feral-instinct.git
-cd feral-instinct
+git clone https://github.com/cognivore/wireguard-mesh.git
+cd wireguard-mesh
 
-# Allow direnv to load the Nix environment
-direnv allow
+# Enter the Nix development environment
+nix develop
+# Or with direnv: direnv allow
 
-# Wait for dependencies to install (first time takes a minute)
+# Run the setup wizard
+ysh bin/wg-setup.ysh wizard
 ```
 
-### Step 5: Update Configuration (if needed)
+## Workflow
 
-If your FeralHosting credentials differ from the defaults, edit `lib/remote.ysh`:
-
-```ysh
-const FERAL_HOST = 'YOUR_SERVER.feralhosting.com'
-const FERAL_USER = 'YOUR_USERNAME'
-```
-
-### Step 6: Run Setup
+### 1. Account Setup
 
 ```bash
-# Run the VPN setup
-ysh bin/feral-vpn.ysh setup
+ysh bin/wg-setup.ysh wizard
 ```
 
-This will:
-1. Connect to your FeralHosting slot via SSH
-2. Download the OpenVPN configuration
-3. Patch deprecated options (`ns-cert-type` → `remote-cert-tls`, `comp-lzo` → `compress`)
-4. Install Tunnelblick (if not present)
-5. Create and install the VPN configuration
+The wizard will:
+1. Open browser to provider signup pages
+2. Generate secure passwords via passveil
+3. Guide you through setting up your accounts
 
-**Accept the Tunnelblick prompts** when they appear.
-
-### Step 7: Connect to VPN
+### 2. VPS Provisioning
 
 ```bash
-# Connect to the VPN
-ysh bin/feral-vpn.ysh connect
-
-# Check status and verify your IP
-ysh bin/feral-vpn.ysh status
+ysh bin/wg-setup.ysh provision
 ```
 
-## Commands
+Guides you through ordering VPS instances at:
+- **RamNode**: Seattle, NYC, LA, Atlanta (US)
+- **FlokiNET**: Finland, Netherlands, Iceland, Romania
+
+### 3. WireGuard Setup
+
+```bash
+# Install WireGuard on all nodes
+ysh bin/wg-setup.ysh setup-wg
+
+# Deploy mesh configuration
+ysh bin/wg-setup.ysh deploy
+
+# Add your client to the mesh
+ysh bin/wg-setup.ysh add-client
+```
+
+### 4. Connect!
+
+```bash
+# TUI route switcher (recommended!)
+ysh bin/wg-switch.ysh
+
+# Or connect directly to default node
+ysh bin/wg-connect.ysh
+
+# Connect to specific node
+ysh bin/wg-connect.ysh ramnode-sea
+
+# Split tunnel (only mesh traffic through VPN)
+ysh bin/wg-connect.ysh --split flokinet-fi
+
+# Check status
+ysh bin/wg-status.ysh
+```
+
+### 5. Switch Routes on the Fly
+
+Use the TUI route switcher to quickly change which node you're routing through:
+
+```bash
+ysh bin/wg-switch.ysh
+```
+
+This opens an interactive menu where you can:
+- See all available nodes with status indicators
+- Select a node with arrow keys
+- Instantly switch your connection
+
+## Commands Reference
+
+### Setup Commands
 
 | Command | Description |
 |---------|-------------|
-| `ysh bin/feral-vpn.ysh setup` | Download configs and set up Tunnelblick |
-| `ysh bin/feral-vpn.ysh connect` | Connect to the VPN |
-| `ysh bin/feral-vpn.ysh disconnect` | Disconnect from the VPN |
-| `ysh bin/feral-vpn.ysh status` | Show connection status and current IP |
-| `ysh bin/feral-vpn.ysh check` | Check if VPN is configured on remote slot |
-| `ysh bin/clean-reset.ysh` | Complete reset: terminate, clean, and reinstall |
+| `wg-setup.ysh wizard` | Interactive account setup |
+| `wg-setup.ysh status` | Show configuration status |
+| `wg-setup.ysh provision` | Create VPS instances |
+| `wg-setup.ysh setup-wg` | Install WireGuard on nodes |
+| `wg-setup.ysh deploy` | Deploy mesh configuration |
+| `wg-setup.ysh add-client` | Add local client to mesh |
+| `wg-setup.ysh teardown` | Clean up everything |
 
-## Clean Reset
+### Connection Commands
 
-If you need to start fresh (new slot, broken config, etc.):
+| Command | Description |
+|---------|-------------|
+| `wg-switch.ysh` | **TUI route switcher** - interactive node selection |
+| `wg-switch.ysh --quick` | Quick switch to last/first available node |
+| `wg-connect.ysh` | Connect to default node |
+| `wg-connect.ysh <node>` | Connect to specific node |
+| `wg-connect.ysh --list` | List available nodes |
+| `wg-connect.ysh --disconnect` | Disconnect from VPN |
+| `wg-connect.ysh --split <node>` | Split tunnel mode |
+| `wg-status.ysh` | Show detailed mesh status |
 
-```bash
-ysh bin/clean-reset.ysh
-```
+### Migration Commands
 
-This script:
-1. Gracefully terminates Tunnelblick
-2. Removes all local VPN configurations
-3. Downloads fresh configs from FeralHosting
-4. Patches and reinstalls everything
-5. Verifies the connection works
+| Command | Description |
+|---------|-------------|
+| `uninstall-tunnelblick.ysh` | Completely remove Tunnelblick |
+| `uninstall-tunnelblick.ysh --force` | Non-interactive removal |
+| `uninstall-tunnelblick.ysh --dry-run` | Show what would be removed |
+
+### Diagnostic Commands
+
+| Command | Description |
+|---------|-------------|
+| `wg-setup.ysh mesh-status` | Show all node statuses |
+| `wg-setup.ysh test-mesh` | Test connectivity between nodes |
+| `wg-setup.ysh gen-client` | Generate client config file |
 
 ## File Structure
 
 ```
-feral-instinct/
+wireguard-mesh/
 ├── bin/
-│   ├── feral-vpn.ysh      # Main CLI tool
-│   └── clean-reset.ysh    # Complete reset script
+│   ├── wg-setup.ysh              # Main setup CLI
+│   ├── wg-connect.ysh            # Client connection manager
+│   ├── wg-switch.ysh             # TUI route switcher
+│   ├── wg-status.ysh             # Status dashboard
+│   └── uninstall-tunnelblick.ysh # Tunnelblick removal script
 ├── lib/
-│   ├── remote.ysh         # SSH/SCP operations for FeralHosting
-│   └── local.ysh          # macOS/Tunnelblick configuration
-├── flake.nix              # Nix flake with dependencies
-└── README.md              # This file
+│   ├── wizard.ysh        # Account setup wizard (with TUI)
+│   ├── tui.ysh           # TUI components (gum wrappers)
+│   ├── ramnode.ysh       # RamNode provisioning
+│   ├── flokinet.ysh      # FlokiNET provisioning
+│   ├── wireguard.ysh     # WireGuard config generation
+│   └── passveil.ysh      # Passveil utilities
+├── templates/
+│   └── wg0.conf.template # WireGuard config template
+├── archive/
+│   └── feral/            # Deprecated Feral Hosting code
+├── flake.nix             # Nix flake with packages
+└── README.md
 ```
 
-## Configuration Files
+## Nix Package
 
-| Location | Description |
-|----------|-------------|
-| `~/.config/feral-instinct/vpn/` | Downloaded OpenVPN configs |
-| `~/.config/feral-instinct/feral.tblk/` | Tunnelblick bundle |
-| `~/.feral-instinct-backups/` | Backups of original configs |
+The flake provides both a development shell and an installable package:
+
+```bash
+# Build the package
+nix build
+
+# Install to your profile
+nix profile install .
+
+# After installation, these commands are available:
+wg-mesh                  # Main setup tool (alias for wg-setup)
+wg-setup wizard         # Setup wizard
+wg-connect              # Connect to VPN
+wg-switch               # TUI route switcher
+wg-status               # Show status
+uninstall-tunnelblick   # Remove Tunnelblick
+```
+
+## Secrets Layout (passveil)
+
+```
+ramnode.com/
+  └── user@email.com
+      └── (password)
+flokinet.is/
+  └── user@email.com
+      └── (password)
+wireguard-mesh/
+  ├── ramnode-sea/
+  │   ├── ip
+  │   ├── root-password
+  │   ├── wg-private-key
+  │   └── wg-public-key
+  ├── ramnode-nyc/
+  │   └── ...
+  ├── flokinet-fi/
+  │   └── ...
+  ├── flokinet-nl/
+  │   └── ...
+  └── client/
+      ├── wg-private-key
+      └── wg-public-key
+```
+
+## Provider Notes
+
+### RamNode
+
+- **Website**: https://ramnode.com
+- **Locations**: Seattle, NYC, Los Angeles, Atlanta, Amsterdam
+- **Pros**: Independent since 2012, KVM VPS, unmetered bandwidth, torrent-friendly
+- **Plans**: From ~$5/mo for 1GB RAM
+- **Payment**: Card, PayPal, crypto
+
+### FlokiNET
+
+- **Website**: https://flokinet.is
+- **Locations**: Finland, Netherlands, Iceland, Romania
+- **Pros**: Privacy-focused, DMCA-ignored, offshore options
+- **Payment**: Card, PayPal, crypto (BTC, XMR)
+
+## Mesh Network Details
+
+- **Subnet**: 10.100.0.0/24
+- **Port**: 51820/UDP
+- **Topology**: Full mesh (every node peers with every other)
+
+### Node IPs
+
+| Node | Internal IP | Location |
+|------|-------------|----------|
+| ramnode-sea | 10.100.0.1 | Seattle, US |
+| ramnode-nyc | 10.100.0.2 | New York, US |
+| ramnode-la | 10.100.0.3 | Los Angeles, US |
+| ramnode-atl | 10.100.0.4 | Atlanta, US |
+| flokinet-fi | 10.100.0.5 | Finland |
+| flokinet-nl | 10.100.0.6 | Netherlands |
+| flokinet-is | 10.100.0.7 | Iceland |
+| flokinet-ro | 10.100.0.8 | Romania |
+| client | 10.100.0.100 | Your machine |
 
 ## Troubleshooting
 
-### SSH Connection Fails
+### Connection Issues
 
 ```bash
-# Test SSH connection manually
-ssh USERNAME@SERVER.feralhosting.com
+# Check if WireGuard is running
+sudo wg show
 
-# If password is required, set up SSH keys:
-ssh-copy-id USERNAME@SERVER.feralhosting.com
+# Test connectivity to mesh nodes
+ysh bin/wg-setup.ysh test-mesh
+
+# Check your public IP
+curl https://ifconfig.me
 ```
 
-### OpenVPN Not Enabled
+### DNS Issues
 
-1. Log into [FeralHosting Manager](https://www.feralhosting.com/manager/)
-2. Go to Software → OpenVPN → Install
-
-### VPN Connects But No Internet
-
-The FeralHosting VPN routes all traffic through their server. If you can't access the internet:
-1. Check that the VPN is actually connected: `ysh bin/feral-vpn.ysh status`
-2. Verify your IP changed to the FeralHosting server IP
-
-### Tunnelblick Configuration Error
-
-If you see errors about unknown extensions or deprecated options, run:
-
+If DNS doesn't work after connecting:
 ```bash
-ysh bin/clean-reset.ysh
+# The client config uses 1.1.1.1 and 8.8.8.8
+# You can edit ~/.config/wireguard-mesh/wg-mesh.conf to change DNS
 ```
 
-This will fetch fresh configs and apply all necessary patches.
+### Node Not Responding
 
-### "comp-lzo" or "ns-cert-type" Warnings
+1. Check the node is running: `ysh bin/wg-setup.ysh mesh-status`
+2. SSH to the node and check WireGuard: `sudo wg show`
+3. Restart WireGuard: `sudo systemctl restart wg-quick@wg0`
 
-These are automatically patched by this tool. If you still see warnings:
-1. Run `ysh bin/clean-reset.ysh`
-2. Or manually check `~/.config/feral-instinct/vpn/client.ovpn` for deprecated options
+## Security Considerations
 
-## Why YSH?
-
-[YSH (Oils shell)](https://oils.pub/) is a modern shell language that:
-- Has proper data structures (Lists, Dicts)
-- Better error handling than bash
-- Cleaner syntax for scripting
-- JSON-compatible structured data
+- All private keys are stored in passveil (GPG-encrypted)
+- SSH keys should use Ed25519 or RSA 4096-bit
+- Change root passwords after initial setup
+- Consider disabling password authentication on VPS
 
 ## License
 
 MIT
 
+---
+
+## Legacy: Feral Hosting Support
+
+This project originally supported Feral Hosting VPN. That code has been archived in the `archive/feral/` directory. The Feral VPN had persistent issues with NAT routing that made it unreliable for full-tunnel VPN usage.

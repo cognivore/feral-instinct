@@ -1,0 +1,88 @@
+#!/usr/bin/env ysh
+# Passveil wrapper utilities for secrets management
+
+# Source guard
+if test -n "${_PASSVEIL_SOURCED:-}" {
+  return 0
+}
+setglobal _PASSVEIL_SOURCED = "1"
+
+# Generate a password and store it in passveil
+# Args: path (e.g., "buyvm.com/user@email.com")
+# Returns: the generated password
+proc passveil-generate (path, ;length=11) {
+  # Insert with generated password
+  passveil insert $path --generate $length 2>/dev/null
+
+  if (_status !== 0) {
+    echo "Error: Failed to generate password for $path" >&2
+    return 1
+  }
+
+  # Return the generated password
+  passveil show $path
+}
+
+# Store a user-provided secret in passveil (no generation)
+# Args: path, secret
+proc passveil-store (path, secret) {
+  # Use echo to pipe the secret to passveil insert
+  echo $secret | passveil insert $path 2>/dev/null
+
+  if (_status !== 0) {
+    echo "Error: Failed to store secret at $path" >&2
+    return 1
+  }
+}
+
+# Retrieve a secret from passveil
+# Args: path
+proc passveil-get (path) {
+  var secret = ''
+  try {
+    setvar secret = $(passveil show $path 2>/dev/null)
+  }
+  if (_status !== 0) {
+    echo "Error: Secret not found at $path" >&2
+    return 1
+  }
+  echo $secret
+}
+
+# Check if a secret exists in passveil
+# Args: path
+# Returns: 0 if exists, 1 if not
+proc passveil-exists (path) {
+  try {
+    passveil show $path >/dev/null 2>&1
+  }
+  return $_status
+}
+
+# List all secrets under a path prefix
+proc passveil-list (prefix) {
+  # Get full list first, then filter
+  var full_list = ''
+  try {
+    setvar full_list = $(passveil list 2>/dev/null)
+  }
+
+  # Filter locally using case pattern matching (no grep needed)
+  if test -n "$full_list" {
+    var newline = $'\n'
+    for line in (full_list.split(newline)) {
+      case $line in
+        ($prefix*)
+          echo $line
+          ;;
+      esac
+    }
+  }
+}
+
+# Delete a secret from passveil
+proc passveil-delete (path) {
+  passveil delete $path 2>/dev/null
+  return $_status
+}
+

@@ -1,0 +1,521 @@
+#!/usr/bin/env ysh
+# Tunnelblick Complete Uninstaller for macOS
+#
+# This script completely removes Tunnelblick and all its configurations
+# from your macOS system. Use this when migrating to WireGuard.
+#
+# What it removes:
+# - Tunnelblick.app from /Applications
+# - User configurations in ~/Library/Application Support/Tunnelblick
+# - System configurations in /Library/Application Support/Tunnelblick
+# - LaunchAgents and LaunchDaemons
+# - Preferences and caches
+# - Keychain items (optional)
+#
+# Usage:
+#   uninstall-tunnelblick.ysh           - Interactive uninstall
+#   uninstall-tunnelblick.ysh --force   - Non-interactive, removes everything
+
+var _this_dir = $(dirname $0)
+
+# Determine lib directory - support both dev mode and installed mode
+var LIB_DIR = "${WG_MESH_LIB:-$_this_dir/../lib}"
+
+source "$LIB_DIR/tui.ysh"
+
+# Colors for output
+const RED = $'\e[31m'
+const GREEN = $'\e[32m'
+const YELLOW = $'\e[33m'
+const BLUE = $'\e[34m'
+const BOLD = $'\e[1m'
+const RESET = $'\e[0m'
+
+# Check if we can use TUI
+var USE_TUI = false
+if command -v gum >/dev/null 2>&1 {
+  setvar USE_TUI = true
+}
+
+proc print-step (msg) {
+  if $USE_TUI {
+    tui-info "$msg"
+  } else {
+    echo "${BLUE}→${RESET} $msg"
+  }
+}
+
+proc print-success (msg) {
+  if $USE_TUI {
+    tui-success "$msg"
+  } else {
+    echo "${GREEN}✓${RESET} $msg"
+  }
+}
+
+proc print-warn (msg) {
+  if $USE_TUI {
+    tui-warn "$msg"
+  } else {
+    echo "${YELLOW}⚠${RESET} $msg"
+  }
+}
+
+proc print-error (msg) {
+  if $USE_TUI {
+    tui-error "$msg"
+  } else {
+    echo "${RED}✗${RESET} $msg"
+  }
+}
+
+proc print-header (title) {
+  if $USE_TUI {
+    tui-header "$title"
+  } else {
+    echo ""
+    echo "${BOLD}════════════════════════════════════════════════════════════${RESET}"
+    echo "${BOLD}  $title${RESET}"
+    echo "${BOLD}════════════════════════════════════════════════════════════${RESET}"
+    echo ""
+  }
+}
+
+# Check if Tunnelblick is installed
+proc is-tunnelblick-installed {
+  test -d "/Applications/Tunnelblick.app"
+}
+
+# Disconnect all VPN connections
+proc disconnect-all-vpns {
+  print-step "Disconnecting all VPN connections..."
+
+  try {
+    osascript -e 'tell application "Tunnelblick" to disconnect all' 2>/dev/null
+  }
+
+  # Give it a moment to disconnect
+  sleep 2
+  print-success "VPN connections disconnected"
+}
+
+# Quit Tunnelblick application
+proc quit-tunnelblick {
+  print-step "Quitting Tunnelblick..."
+
+  # Try graceful quit first
+  try {
+    osascript -e 'tell application "Tunnelblick" to quit' 2>/dev/null
+  }
+
+  sleep 1
+
+  # Force kill if still running
+  try {
+    pkill -x Tunnelblick 2>/dev/null
+  }
+  try {
+    pkill -x openvpn 2>/dev/null
+  }
+
+  sleep 1
+  print-success "Tunnelblick quit"
+}
+
+# Remove the application
+proc remove-application {
+  print-step "Removing Tunnelblick.app..."
+
+  if test -d "/Applications/Tunnelblick.app" {
+    sudo rm -rf "/Applications/Tunnelblick.app"
+    print-success "Removed /Applications/Tunnelblick.app"
+  } else {
+    print-warn "Tunnelblick.app not found in /Applications"
+  }
+}
+
+# Remove user-level files
+proc remove-user-files {
+  print-step "Removing user configuration files..."
+
+  var home = "$[ENV.HOME]"
+
+  # Application Support
+  if test -d "$home/Library/Application Support/Tunnelblick" {
+    rm -rf "$home/Library/Application Support/Tunnelblick"
+    print-success "Removed ~/Library/Application Support/Tunnelblick"
+  }
+
+  # Preferences
+  if test -f "$home/Library/Preferences/net.tunnelblick.tunnelblick.plist" {
+    rm -f "$home/Library/Preferences/net.tunnelblick.tunnelblick.plist"
+    print-success "Removed preferences plist"
+  }
+
+  # Preferences (alternative domain)
+  if test -f "$home/Library/Preferences/com.openvpn.tunnelblick.plist" {
+    rm -f "$home/Library/Preferences/com.openvpn.tunnelblick.plist"
+    print-success "Removed alternative preferences plist"
+  }
+
+  # Caches
+  if test -d "$home/Library/Caches/net.tunnelblick.tunnelblick" {
+    rm -rf "$home/Library/Caches/net.tunnelblick.tunnelblick"
+    print-success "Removed caches"
+  }
+
+  # Logs
+  if test -d "$home/Library/Logs/Tunnelblick" {
+    rm -rf "$home/Library/Logs/Tunnelblick"
+    print-success "Removed logs"
+  }
+
+  # Saved Application State
+  if test -d "$home/Library/Saved Application State/net.tunnelblick.tunnelblick.savedState" {
+    rm -rf "$home/Library/Saved Application State/net.tunnelblick.tunnelblick.savedState"
+    print-success "Removed saved application state"
+  }
+
+  # Containers (sandboxed version)
+  if test -d "$home/Library/Containers/net.tunnelblick.tunnelblick" {
+    rm -rf "$home/Library/Containers/net.tunnelblick.tunnelblick"
+    print-success "Removed container data"
+  }
+}
+
+# Remove system-level files (requires sudo)
+proc remove-system-files {
+  print-step "Removing system configuration files (requires sudo)..."
+
+  # System Application Support
+  if test -d "/Library/Application Support/Tunnelblick" {
+    sudo rm -rf "/Library/Application Support/Tunnelblick"
+    print-success "Removed /Library/Application Support/Tunnelblick"
+  }
+
+  # LaunchDaemons
+  var daemons = [
+    "/Library/LaunchDaemons/net.tunnelblick.tunnelblick.LaunchAtLogin.plist",
+    "/Library/LaunchDaemons/net.tunnelblick.tunnelblick.tunnelblickd.plist"
+  ]
+
+  for daemon in (daemons) {
+    if test -f "$daemon" {
+      # Unload first
+      try {
+        sudo launchctl unload "$daemon" 2>/dev/null
+      }
+      sudo rm -f "$daemon"
+      print-success "Removed $daemon"
+    }
+  }
+
+  # Kext (kernel extensions - older versions)
+  if test -d "/Library/Extensions/tap.kext" {
+    sudo rm -rf "/Library/Extensions/tap.kext"
+    print-success "Removed tap.kext"
+  }
+  if test -d "/Library/Extensions/tun.kext" {
+    sudo rm -rf "/Library/Extensions/tun.kext"
+    print-success "Removed tun.kext"
+  }
+
+  # System Extensions (newer macOS)
+  # These are managed by the system and should be removed automatically
+  # when the app is deleted, but we can try to force removal
+  try {
+    sudo systemextensionsctl uninstall net.tunnelblick.tunnelblick 2>/dev/null
+  }
+}
+
+# Remove LaunchAgents
+proc remove-launch-agents {
+  print-step "Removing LaunchAgents..."
+
+  var home = "$[ENV.HOME]"
+
+  # User LaunchAgents
+  var user_agents = [
+    "$home/Library/LaunchAgents/net.tunnelblick.tunnelblick.LaunchAtLogin.plist",
+    "$home/Library/LaunchAgents/net.tunnelblick.tunnelblick.plist"
+  ]
+
+  for agent in (user_agents) {
+    if test -f "$agent" {
+      try {
+        launchctl unload "$agent" 2>/dev/null
+      }
+      rm -f "$agent"
+      print-success "Removed $agent"
+    }
+  }
+}
+
+# Clear keychain items (optional)
+proc remove-keychain-items {
+  print-step "Removing Tunnelblick keychain items..."
+
+  # This removes saved passwords for VPN configurations
+  # Using security command to find and delete items
+  try {
+    security delete-generic-password -l "Tunnelblick" 2>/dev/null
+  }
+  try {
+    security delete-generic-password -s "Tunnelblick" 2>/dev/null
+  }
+
+  # Remove any Feral-specific keychain entries
+  try {
+    security delete-generic-password -l "feral" 2>/dev/null
+  }
+
+  print-success "Keychain items removed (if any existed)"
+}
+
+# Kill any remaining helper processes
+proc cleanup-processes {
+  print-step "Cleaning up any remaining processes..."
+
+  try {
+    pkill -9 -f tunnelblick 2>/dev/null
+  }
+  try {
+    pkill -9 -f openvpn 2>/dev/null
+  }
+
+  print-success "Processes cleaned up"
+}
+
+# Reset preferences cache
+proc reset-prefs-cache {
+  print-step "Resetting preferences cache..."
+
+  try {
+    defaults delete net.tunnelblick.tunnelblick 2>/dev/null
+  }
+  try {
+    defaults delete com.openvpn.tunnelblick 2>/dev/null
+  }
+
+  # Kill cfprefsd to clear preference caches
+  try {
+    killall cfprefsd 2>/dev/null
+  }
+
+  print-success "Preferences cache reset"
+}
+
+# Show what will be removed
+proc show-removal-targets {
+  print-header "Files and directories to be removed"
+
+  var home = "$[ENV.HOME]"
+
+  var targets = [
+    "/Applications/Tunnelblick.app",
+    "$home/Library/Application Support/Tunnelblick",
+    "/Library/Application Support/Tunnelblick",
+    "$home/Library/Preferences/net.tunnelblick.tunnelblick.plist",
+    "$home/Library/Caches/net.tunnelblick.tunnelblick",
+    "$home/Library/Logs/Tunnelblick",
+    "$home/Library/LaunchAgents/net.tunnelblick.tunnelblick.*",
+    "/Library/LaunchDaemons/net.tunnelblick.tunnelblick.*",
+    "/Library/Extensions/tap.kext",
+    "/Library/Extensions/tun.kext"
+  ]
+
+  for target in (targets) {
+    # Expand any wildcards in the home path
+    var expanded = $(echo $target | sed "s|\$home|$home|g")
+
+    # Check if exists (handle wildcards with separate try block)
+    var exists = false
+    if test -e "$expanded" {
+      setvar exists = true
+    } else {
+      # Check for wildcard matches (for paths with *)
+      try {
+        ls $expanded >/dev/null 2>&1
+        setvar exists = true
+      }
+    }
+
+    if (exists) {
+      echo "  ${RED}✗${RESET} $expanded"
+    } else {
+      echo "  ${YELLOW}○${RESET} $expanded (not present)"
+    }
+  }
+  echo ""
+}
+
+# Interactive confirmation
+proc confirm-uninstall {
+  if $USE_TUI {
+    try {
+      gum confirm "Are you sure you want to completely remove Tunnelblick?"
+    }
+    if (_status !== 0) {
+      return 1
+    }
+
+    echo ""
+
+    try {
+      gum confirm "This will remove ALL VPN configurations. Continue?" --default=false
+    }
+    if (_status !== 0) {
+      return 1
+    }
+  } else {
+    echo ""
+    echo -n "${BOLD}Are you sure you want to completely remove Tunnelblick? [y/N]:${RESET} "
+    var answer = ''
+    read -r answer
+
+    case (answer) {
+      y|Y|yes|Yes|YES { true }
+      * { return 1 }
+    }
+
+    echo -n "${BOLD}This will remove ALL VPN configurations. Continue? [y/N]:${RESET} "
+    read -r answer
+
+    case (answer) {
+      y|Y|yes|Yes|YES { true }
+      * { return 1 }
+    }
+  }
+
+  return 0
+}
+
+# Main uninstall procedure
+proc do-uninstall {
+  print-header "Tunnelblick Uninstaller"
+
+  # Check if Tunnelblick is installed (use try/_status pattern for errexit safety)
+  try {
+    is-tunnelblick-installed
+  }
+  if (_status !== 0) {
+    print-warn "Tunnelblick does not appear to be installed"
+    echo ""
+
+    if $USE_TUI {
+      try {
+        gum confirm "Continue with cleanup of leftover files?"
+      }
+      if (_status !== 0) {
+        echo "Uninstall cancelled."
+        return 0
+      }
+    } else {
+      echo -n "Continue with cleanup of leftover files? [y/N]: "
+      var answer = ''
+      read -r answer
+      case (answer) {
+        y|Y { true }
+        * { echo "Uninstall cancelled."; return 0 }
+      }
+    }
+  }
+
+  # Show what will be removed
+  show-removal-targets
+
+  # Confirm
+  try {
+    confirm-uninstall
+  }
+  if (_status !== 0) {
+    echo "Uninstall cancelled."
+    return 0
+  }
+
+  echo ""
+  print-header "Beginning Uninstall"
+
+  # Perform uninstall steps
+  disconnect-all-vpns
+  quit-tunnelblick
+  remove-application
+  remove-user-files
+  remove-launch-agents
+  remove-system-files
+  remove-keychain-items
+  cleanup-processes
+  reset-prefs-cache
+
+  print-header "Uninstall Complete"
+
+  echo "Tunnelblick has been completely removed from your system."
+  echo ""
+  echo "If you were using this for Feral VPN, you can now use WireGuard instead:"
+  echo "  ysh bin/wg-setup.ysh wizard    # Set up provider accounts"
+  echo "  ysh bin/wg-switch.ysh          # Connect to VPN"
+  echo ""
+
+  return 0
+}
+
+# Force uninstall (non-interactive)
+proc do-force-uninstall {
+  print-header "Tunnelblick Force Uninstall"
+
+  disconnect-all-vpns
+  quit-tunnelblick
+  remove-application
+  remove-user-files
+  remove-launch-agents
+  remove-system-files
+  remove-keychain-items
+  cleanup-processes
+  reset-prefs-cache
+
+  print-success "Tunnelblick completely removed"
+  return 0
+}
+
+# Usage
+proc usage {
+  echo "Tunnelblick Complete Uninstaller"
+  echo ""
+  echo "Usage: uninstall-tunnelblick.ysh [options]"
+  echo ""
+  echo "Options:"
+  echo "  (none)        Interactive uninstall with confirmations"
+  echo "  --force, -f   Non-interactive, removes everything"
+  echo "  --dry-run     Show what would be removed without removing"
+  echo "  --help, -h    Show this help"
+  echo ""
+}
+
+# Main
+proc main {
+  var action = "interactive"
+
+  for arg in (ARGV) {
+    case (arg) {
+      --force | -f   { setvar action = "force" }
+      --dry-run      { setvar action = "dry-run" }
+      --help | -h    { usage; exit 0 }
+    }
+  }
+
+  case (action) {
+    dry-run {
+      print-header "Dry Run - Files to be removed"
+      show-removal-targets
+    }
+    force {
+      do-force-uninstall
+    }
+    interactive {
+      do-uninstall
+    }
+  }
+}
+
+main @ARGV
+

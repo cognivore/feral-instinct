@@ -1,0 +1,282 @@
+#!/usr/bin/env ysh
+# WireGuard Mesh - Client Connection Manager
+#
+# Usage:
+#   wg-connect.ysh              - Connect to nearest/default node
+#   wg-connect.ysh <node>       - Connect to specific node (buyvm-lv, flokinet-fi, etc.)
+#   wg-connect.ysh --list       - List available nodes
+#   wg-connect.ysh --disconnect - Disconnect from VPN
+
+# Determine lib directory - support both dev mode and installed mode
+var LIB_DIR = "${WG_MESH_LIB:-$_this_dir/../lib}"
+var CONFIG_DIR = "$[ENV.HOME]/.config/wireguard-mesh"
+
+source "$LIB_DIR/passveil.ysh"
+source "$LIB_DIR/wireguard.ysh"
+
+const WG_INTERFACE = "wg-mesh"
+
+proc usage {
+  echo "WireGuard Mesh - Client Connection"
+  echo ""
+  echo "Usage: wg-connect.ysh [options] [node]"
+  echo ""
+  echo "Options:"
+  echo "  --list, -l        List available mesh nodes"
+  echo "  --disconnect, -d  Disconnect from VPN"
+  echo "  --status, -s      Show connection status"
+  echo "  --full            Route all traffic through VPN (default)"
+  echo "  --split           Only route mesh traffic through VPN"
+  echo "  --help, -h        Show this help"
+  echo ""
+  echo "Nodes:"
+  echo "  ramnode-sea       US West (Seattle)"
+  echo "  ramnode-nyc       US East (NYC)"
+  echo "  ramnode-la        US West (LA)"
+  echo "  ramnode-atl       US South (Atlanta)"
+  echo "  flokinet-fi       Nordic (Finland)"
+  echo "  flokinet-nl       EU (Netherlands)"
+  echo "  flokinet-is       Nordic (Iceland)"
+  echo "  flokinet-ro       EU (Romania)"
+  echo ""
+  echo "Examples:"
+  echo "  wg-connect.ysh                  # Connect to default node"
+  echo "  wg-connect.ysh ramnode-sea      # Connect to Seattle"
+  echo "  wg-connect.ysh --split flokinet-fi # Split tunnel via Finland"
+  echo ""
+}
+
+proc list-nodes {
+  print-header "Available Mesh Nodes"
+
+  for node_key in (MESH_NODES) {
+    var node = MESH_NODES[node_key]
+    var provider = node['provider']
+    var location = node['location']
+    var node_path = "wireguard-mesh/$provider-$location"
+
+    var public_ip = $(passveil-get "$node_path/ip" 2>/dev/null)
+    var internal_ip = node['internal_ip']
+    var node_name = node['name']
+
+    if (public_ip !== '') {
+      echo "${COLOR_GREEN}●${COLOR_RESET} $node_key"
+      echo "    $node_name"
+      echo "    Public: $public_ip"
+      echo "    Mesh IP: $internal_ip"
+    } else {
+      echo "${COLOR_YELLOW}○${COLOR_RESET} $node_key"
+      echo "    $node_name"
+      echo "    ${COLOR_YELLOW}Not provisioned${COLOR_RESET}"
+    }
+    echo ""
+  }
+}
+
+proc show-status {
+  print-header "Connection Status"
+
+  # Check if WireGuard interface exists
+  if test -e "/var/run/wireguard/$WG_INTERFACE.name" {
+    echo "${COLOR_GREEN}●${COLOR_RESET} VPN Connected"
+    echo ""
+
+    # Show interface details
+    try {
+      sudo wg show $WG_INTERFACE
+    }
+    if (_status !== 0) {
+      echo "Could not get interface details (try with sudo)"
+    }
+
+    echo ""
+    echo "Current public IP:"
+    curl -s --max-time 5 https://ifconfig.me && echo ""
+  } else {
+    echo "${COLOR_YELLOW}○${COLOR_RESET} VPN Disconnected"
+    echo ""
+    echo "Current public IP:"
+    curl -s --max-time 5 https://ifconfig.me && echo ""
+  }
+}
+
+proc disconnect {
+  print-info "Disconnecting from WireGuard mesh..."
+
+  # Try to bring down the interface
+  try {
+    sudo wg-quick down $WG_INTERFACE 2>/dev/null
+  }
+
+  # Also try the config file path
+  var config_file = "$CONFIG_DIR/$WG_INTERFACE.conf"
+  if test -f $config_file {
+    try {
+      sudo wg-quick down $config_file 2>/dev/null
+    }
+  }
+
+  print-success "Disconnected"
+  return 0
+}
+
+proc connect (node_key, ;routing_mode="full") {
+  # Validate node
+  var node = MESH_NODES[node_key]
+  if (node === null) {
+    echo "Error: Unknown node '$node_key'" >&2
+    echo "Use --list to see available nodes" >&2
+    return 1
+  }
+
+  var provider = node['provider']
+  var location = node['location']
+  var node_path = "wireguard-mesh/$provider-$location"
+  var node_name = node['name']
+  var node_internal_ip = node['internal_ip']
+
+  # Get node info
+  var public_ip = $(passveil-get "$node_path/ip" 2>/dev/null)
+  var node_pubkey = $(passveil-get "$node_path/wg-public-key" 2>/dev/null)
+
+  if (public_ip === '' or node_pubkey === '') {
+    echo "Error: Node $node_key not fully configured" >&2
+    echo "Run 'wg-setup.ysh provision' and 'wg-setup.ysh deploy' first" >&2
+    return 1
+  }
+
+  # Get/generate client keys
+  var client_path = "wireguard-mesh/client"
+  var client_priv = $(passveil-get "$client_path/wg-private-key" 2>/dev/null)
+
+  if (client_priv === '') {
+    print-info "Generating client keys..."
+    var private_key = $(wg genkey)
+    var public_key = $(echo $private_key | wg pubkey)
+    passveil-store "$client_path/wg-private-key" $private_key
+    passveil-store "$client_path/wg-public-key" $public_key
+    setvar client_priv = private_key
+
+    echo ""
+    echo "${COLOR_YELLOW}Note: You need to add this client to the mesh nodes.${COLOR_RESET}"
+    echo "Run: wg-setup.ysh add-client"
+    echo ""
+  }
+
+  var client_ip = CLIENT_NODE['internal_ip']
+
+  # Determine AllowedIPs based on routing mode
+  var allowed_ips = ''
+  if (routing_mode === 'full') {
+    setvar allowed_ips = '0.0.0.0/0, ::/0'
+  } else {
+    setvar allowed_ips = "$node_internal_ip/32, 10.100.0.0/24"
+  }
+
+  # Create config directory
+  mkdir -p $CONFIG_DIR
+
+  # Generate config file
+  var config_file = "$CONFIG_DIR/$WG_INTERFACE.conf"
+
+  cat > $config_file << EOF
+# WireGuard Mesh Client Configuration
+# Node: $node_key ($node_name)
+# Mode: $routing_mode tunnel
+
+[Interface]
+PrivateKey = $client_priv
+Address = $client_ip/24
+DNS = 1.1.1.1, 8.8.8.8
+
+[Peer]
+PublicKey = $node_pubkey
+Endpoint = $public_ip:$WG_PORT
+AllowedIPs = $allowed_ips
+PersistentKeepalive = 25
+EOF
+
+  chmod 600 $config_file
+
+  # Disconnect any existing connection
+  try {
+    sudo wg-quick down $config_file 2>/dev/null
+  }
+
+  # Connect
+  print-info "Connecting to $node_key ($node_name)..."
+  print-info "Routing mode: $routing_mode"
+
+  sudo wg-quick up $config_file
+
+  if (_status !== 0) {
+    echo "Error: Failed to connect" >&2
+    return 1
+  }
+
+  print-success "Connected to $node_key!"
+  echo ""
+
+  # Verify connection
+  sleep 2
+  echo "Current public IP:"
+  curl -s --max-time 10 https://ifconfig.me && echo ""
+
+  return 0
+}
+
+# Find first available node
+proc get-default-node {
+  for node_key in (MESH_NODES) {
+    var node = MESH_NODES[node_key]
+    var provider = node['provider']
+    var location = node['location']
+    var node_path = "wireguard-mesh/$provider-$location"
+
+    var ip = $(passveil-get "$node_path/ip" 2>/dev/null)
+    var pubkey = $(passveil-get "$node_path/wg-public-key" 2>/dev/null)
+
+    if (ip !== '' and pubkey !== '') {
+      echo $node_key
+      return 0
+    }
+  }
+  return 1
+}
+
+# Parse arguments
+var routing_mode = 'full'
+var action = 'connect'
+var target_node = ''
+
+for arg in (ARGV) {
+  case (arg) {
+    --list | -l     { setvar action = 'list' }
+    --disconnect | -d { setvar action = 'disconnect' }
+    --status | -s   { setvar action = 'status' }
+    --full          { setvar routing_mode = 'full' }
+    --split         { setvar routing_mode = 'split' }
+    --help | -h     { usage; exit 0 }
+    *               { setvar target_node = arg }
+  }
+}
+
+# Execute action
+case (action) {
+  list       { list-nodes }
+  disconnect { disconnect }
+  status     { show-status }
+  connect    {
+    if (target_node === '') {
+      setvar target_node = $(get-default-node)
+      if (target_node === '') {
+        echo "Error: No configured nodes found" >&2
+        echo "Run 'wg-setup.ysh wizard' and 'wg-setup.ysh provision' first" >&2
+        exit 1
+      }
+      print-info "Using default node: $target_node"
+    }
+    connect $target_node (routing_mode=routing_mode)
+  }
+}
+

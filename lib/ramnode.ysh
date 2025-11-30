@@ -1,0 +1,314 @@
+#!/usr/bin/env ysh
+# RamNode provisioning utilities
+#
+# RamNode is an independent VPS provider since 2012.
+# They use SolusVM panel - API exists for managing VPS but not ordering.
+# This module provides:
+# - Guided manual provisioning via web panel
+# - SSH-based post-provisioning setup
+# - Credential management via passveil
+
+# Source guard
+if test -n "${_RAMNODE_SOURCED:-}" {
+  return 0
+}
+setglobal _RAMNODE_SOURCED = "1"
+
+# Determine lib directory for cross-library sourcing
+var _lib_dir = "${WG_MESH_LIB:-$_this_dir}"
+
+source "$_lib_dir/passveil.ysh"
+
+const RAMNODE_DOMAIN = "ramnode.com"
+const RAMNODE_CLIENT_AREA = "https://clientarea.ramnode.com"
+const RAMNODE_ORDER_URL = "https://clientarea.ramnode.com/cart.php"
+
+# Location configurations
+const RAMNODE_LOCATIONS = {
+  seattle: {
+    name: "Seattle",
+    code: "SEA",
+    country: "US",
+    region: "US West",
+    datacenter: "Seattle, WA"
+  },
+  nyc: {
+    name: "New York",
+    code: "NYC",
+    country: "US",
+    region: "US East",
+    datacenter: "New York, NY"
+  },
+  la: {
+    name: "Los Angeles",
+    code: "LA",
+    country: "US",
+    region: "US West",
+    datacenter: "Los Angeles, CA"
+  },
+  atlanta: {
+    name: "Atlanta",
+    code: "ATL",
+    country: "US",
+    region: "US South",
+    datacenter: "Atlanta, GA"
+  },
+  nl: {
+    name: "Netherlands",
+    code: "NL",
+    country: "NL",
+    region: "EU",
+    datacenter: "Amsterdam"
+  }
+}
+
+# Recommended plan for WireGuard nodes
+const RAMNODE_RECOMMENDED_PLAN = {
+  name: "Standard KVM 1GB",
+  ram: "1GB",
+  storage: "20GB SSD",
+  bandwidth: "2TB",
+  price: '~$5/mo'
+}
+
+# Get stored credentials for RamNode
+proc ramnode-get-credentials {
+  var creds_list = $(passveil-list "$RAMNODE_DOMAIN/")
+  if test -z "$creds_list" {
+    echo "Error: No RamNode credentials found. Run 'wg-setup.ysh wizard' first." >&2
+    return 1
+  }
+
+  # Extract email from the first credential path
+  var newline = $'\n'
+  var email = ''
+  for line in (creds_list.split(newline)) {
+    # Skip API key entries and empty lines
+    if test -z "$line" {
+      continue
+    }
+
+    # Check if it's an API key entry
+    case $line in
+      (*/api)
+        continue
+        ;;
+    esac
+
+    # Check if it matches our domain
+    var domain = RAMNODE_DOMAIN
+    if test "${line%%/*}" = "$domain" {
+      # Extract email part by removing the domain prefix
+      setvar email = "${line#$domain/}"
+      break
+    }
+  }
+
+  if test -z "$email" {
+    echo "Error: Could not parse RamNode credentials" >&2
+    return 1
+  }
+
+  echo $email
+}
+
+# Interactive provisioning guide for RamNode
+proc ramnode-provision-interactive (location) {
+  var loc = RAMNODE_LOCATIONS[location]
+  if test -z "$loc" {
+    echo "Error: Unknown location '$location'" >&2
+    echo "Valid locations: seattle, nyc, la, atlanta, nl" >&2
+    return 1
+  }
+
+  var loc_name = loc['name']
+  var loc_dc = loc['datacenter']
+  var plan_name = RAMNODE_RECOMMENDED_PLAN['name']
+  var plan_price = RAMNODE_RECOMMENDED_PLAN['price']
+
+  echo ""
+  echo "═══════════════════════════════════════════════════════════════"
+  echo "  RamNode VPS Provisioning - $loc_name"
+  echo "═══════════════════════════════════════════════════════════════"
+  echo ""
+  echo "We'll guide you through ordering a VPS at RamNode."
+  echo ""
+  echo "Recommended setup:"
+  echo "  • Location: $loc_dc"
+  echo "  • Plan: $plan_name ($plan_price)"
+  echo "  • OS: Debian 12 or Ubuntu 22.04"
+  echo ""
+  echo "Steps:"
+  echo "  1. Open RamNode order page (we'll open it for you)"
+  echo "  2. Select 'Standard KVM' category"
+  echo "  3. Choose '$loc_name' location"
+  echo "  4. Select 1GB RAM plan"
+  echo "  5. Choose Debian 12 or Ubuntu 22.04"
+  echo "  6. Complete checkout"
+  echo "  7. Note down the IP address and root password from welcome email"
+  echo ""
+
+  # Open order page
+  echo "Opening RamNode order page..."
+  var os = $(uname)
+  case $os in
+    (Darwin)
+      open "$RAMNODE_ORDER_URL"
+      ;;
+    (*)
+      if command -v xdg-open >/dev/null {
+        xdg-open "$RAMNODE_ORDER_URL"
+      } else {
+        echo "Please open: $RAMNODE_ORDER_URL"
+      }
+      ;;
+  esac
+
+  echo ""
+  echo "After your VPS is provisioned, you'll need to provide:"
+  echo "  • Server IP address"
+  echo "  • Root password (or SSH key if you added one)"
+  echo ""
+  echo -n "Press Enter when your VPS is ready..."
+  read -r
+
+  # Collect VPS details
+  echo ""
+  echo -n "Enter the VPS IP address: "
+  var ip = ''
+  read -r ip
+
+  if test -z "$ip" {
+    echo "Error: IP address required" >&2
+    return 1
+  }
+
+  echo -n "Enter the root password (or press Enter if using SSH key): "
+  var root_pass = ''
+  read -r root_pass
+
+  # Store in passveil
+  var node_path = "wireguard-mesh/ramnode-$location"
+
+  passveil-store "$node_path/ip" $ip
+
+  if test -n "$root_pass" {
+    passveil-store "$node_path/root-password" $root_pass
+  }
+
+  echo ""
+  echo "✓ VPS details stored in passveil"
+  echo "  Path: $node_path"
+  echo "  IP: $ip"
+  echo ""
+
+  return 0
+}
+
+# Setup WireGuard on a RamNode VPS
+proc ramnode-setup-wireguard (location) {
+  var node_path = "wireguard-mesh/ramnode-$location"
+
+  var ip = $(passveil-get "$node_path/ip" 2>/dev/null)
+  if test -z "$ip" {
+    echo "Error: No VPS configured for ramnode-$location" >&2
+    echo "Run provisioning first." >&2
+    return 1
+  }
+
+  echo ""
+  echo "Setting up WireGuard on ramnode-$location ($ip)..."
+  echo ""
+
+  # Check SSH connectivity
+  echo "Testing SSH connection..."
+  var ssh_ok = ''
+  try {
+    setvar ssh_ok = $(ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no root@$ip "echo ok" 2>/dev/null)
+  }
+
+  if test "$ssh_ok" != "ok" {
+    echo "Error: Cannot connect to $ip via SSH" >&2
+    echo "Make sure:" >&2
+    echo "  • The server is running" >&2
+    echo "  • SSH is enabled" >&2
+    echo "  • Your SSH key is authorized (or use password)" >&2
+    return 1
+  }
+
+  echo "SSH connection successful"
+  echo ""
+
+  # Install WireGuard
+  echo "Installing WireGuard..."
+  ssh -o StrictHostKeyChecking=no root@$ip '
+    set -e
+
+    # Detect OS and install WireGuard
+    if command -v apt-get >/dev/null 2>&1; then
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -qq
+      apt-get install -y -qq wireguard wireguard-tools
+    elif command -v dnf >/dev/null 2>&1; then
+      dnf install -y wireguard-tools
+    elif command -v yum >/dev/null 2>&1; then
+      yum install -y epel-release
+      yum install -y wireguard-tools
+    else
+      echo "Unsupported OS - please install WireGuard manually"
+      exit 1
+    fi
+
+    # Enable IP forwarding
+    echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-wireguard.conf
+    echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.d/99-wireguard.conf
+    sysctl -p /etc/sysctl.d/99-wireguard.conf
+
+    echo "WireGuard installed successfully"
+  '
+
+  if (_status !== 0) {
+    echo "Error: Failed to install WireGuard" >&2
+    return 1
+  }
+
+  # Generate WireGuard keys
+  echo ""
+  echo "Generating WireGuard keys..."
+
+  var private_key = $(ssh -o StrictHostKeyChecking=no root@$ip "wg genkey")
+  var public_key = $(echo $private_key | ssh -o StrictHostKeyChecking=no root@$ip "wg pubkey")
+
+  # Store keys in passveil
+  passveil-store "$node_path/wg-private-key" $private_key
+  passveil-store "$node_path/wg-public-key" $public_key
+
+  echo "✓ WireGuard keys generated and stored"
+  echo ""
+  echo "Node ramnode-$location is ready for mesh configuration"
+  echo ""
+
+  return 0
+}
+
+# Get VPS info for a location
+proc ramnode-get-vps-info (location) {
+  var node_path = "wireguard-mesh/ramnode-$location"
+
+  var ip = $(passveil-get "$node_path/ip" 2>/dev/null)
+  var pubkey = $(passveil-get "$node_path/wg-public-key" 2>/dev/null)
+
+  if test -z "$ip" {
+    echo "not-provisioned"
+    return 1
+  }
+
+  if test -z "$pubkey" {
+    echo "provisioned-no-wg"
+    return 0
+  }
+
+  echo "ready"
+  return 0
+}
+

@@ -1,0 +1,141 @@
+#!/usr/bin/env ysh
+# WireGuard Mesh - Status Dashboard
+#
+# Shows comprehensive status of the mesh network
+
+# Determine lib directory - support both dev mode and installed mode
+var LIB_DIR = "${WG_MESH_LIB:-$_this_dir/../lib}"
+
+source "$LIB_DIR/passveil.ysh"
+source "$LIB_DIR/wireguard.ysh"
+
+proc show-local-status {
+  echo "${COLOR_BOLD}Local Client${COLOR_RESET}"
+  echo "────────────"
+
+  var client_path = "wireguard-mesh/client"
+  var client_pub = $(passveil-get "$client_path/wg-public-key" 2>/dev/null)
+
+  if (client_pub !== '') {
+    var short_pub = $(echo $client_pub | cut -c1-30)
+    var client_internal_ip = CLIENT_NODE['internal_ip']
+    echo "Public Key: $short_pub..."
+    echo "Internal IP: $client_internal_ip"
+  } else {
+    echo "${COLOR_YELLOW}Not configured${COLOR_RESET}"
+    echo "Run: wg-connect.ysh to generate client keys"
+  }
+
+  echo ""
+
+  # Check if connected
+  var WG_INTERFACE = "wg-mesh"
+  try {
+    var wg_out = $(sudo wg show $WG_INTERFACE 2>/dev/null)
+    if (wg_out !== '') {
+      echo "Status: ${COLOR_GREEN}Connected${COLOR_RESET}"
+      echo ""
+      echo "$wg_out"
+    } else {
+      echo "Status: ${COLOR_YELLOW}Disconnected${COLOR_RESET}"
+    }
+  }
+  if (_status !== 0) {
+    echo "Status: ${COLOR_YELLOW}Disconnected${COLOR_RESET}"
+  }
+}
+
+proc show-mesh-status {
+  echo ""
+  echo "${COLOR_BOLD}Mesh Nodes${COLOR_RESET}"
+  echo "──────────"
+
+  var online = 0
+  var offline = 0
+  var unconfigured = 0
+
+  for node_key in (MESH_NODES) {
+    var node = MESH_NODES[node_key]
+    var provider = node['provider']
+    var location = node['location']
+    var node_path = "wireguard-mesh/$provider-$location"
+    var node_name = node['name']
+
+    var public_ip = $(passveil-get "$node_path/ip" 2>/dev/null)
+    var pubkey = $(passveil-get "$node_path/wg-public-key" 2>/dev/null)
+    var internal_ip = node['internal_ip']
+
+    echo ""
+    echo "${COLOR_CYAN}$node_key${COLOR_RESET} - $node_name"
+
+    if (public_ip === '') {
+      echo "  └─ ${COLOR_YELLOW}○ Not provisioned${COLOR_RESET}"
+      setvar unconfigured = unconfigured + 1
+      continue
+    }
+
+    echo "  ├─ Public: $public_ip"
+    echo "  ├─ Mesh IP: $internal_ip"
+
+    if (pubkey !== '') {
+      var pubkey_short = pubkey[:20]
+      echo "  ├─ WG Key: $pubkey_short..."
+    }
+
+    # Quick connectivity check
+    try {
+      var ping_result = $(ping -c 1 -W 2 $public_ip 2>/dev/null)
+      echo "  └─ ${COLOR_GREEN}● Online${COLOR_RESET}"
+      setvar online = online + 1
+    }
+    if (_status !== 0) {
+      echo "  └─ ${COLOR_RED}● Unreachable${COLOR_RESET}"
+      setvar offline = offline + 1
+    }
+  }
+
+  echo ""
+  echo "────────────"
+  echo "Summary: ${COLOR_GREEN}$online online${COLOR_RESET}, ${COLOR_RED}$offline offline${COLOR_RESET}, ${COLOR_YELLOW}$unconfigured unconfigured${COLOR_RESET}"
+}
+
+proc show-network-info {
+  echo ""
+  echo "${COLOR_BOLD}Network Info${COLOR_RESET}"
+  echo "────────────"
+
+  echo -n "Public IP: "
+  var pub_ip = $(curl -s --max-time 5 https://ifconfig.me 2>/dev/null)
+  if (pub_ip !== '') {
+    echo "$pub_ip"
+  } else {
+    echo "${COLOR_YELLOW}Unable to determine${COLOR_RESET}"
+  }
+
+  # Try to get geolocation
+  try {
+    var geo = $(curl -s --max-time 5 "https://ipinfo.io/$pub_ip/json" 2>/dev/null)
+    if (geo !== '') {
+      var city = $(echo $geo | jq -r '.city // empty')
+      var country = $(echo $geo | jq -r '.country // empty')
+      var org = $(echo $geo | jq -r '.org // empty')
+
+      if (city !== '' and country !== '') {
+        echo "Location: $city, $country"
+      }
+      if (org !== '') {
+        echo "ISP: $org"
+      }
+    }
+  }
+}
+
+# Main
+print-header "WireGuard Mesh Status"
+
+show-local-status
+show-mesh-status
+show-network-info
+
+echo ""
+

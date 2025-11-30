@@ -1,0 +1,268 @@
+#!/usr/bin/env ysh
+# FlokiNET provisioning utilities
+#
+# FlokiNET is a privacy-focused hosting provider.
+# They don't have a public API, so provisioning is manual via their web panel.
+# This module provides:
+# - Guided manual provisioning
+# - SSH-based post-provisioning setup
+# - Credential management via passveil
+
+# Source guard
+if test -n "${_FLOKINET_SOURCED:-}" {
+  return 0
+}
+setglobal _FLOKINET_SOURCED = "1"
+
+# Determine lib directory for cross-library sourcing
+var _lib_dir = "${WG_MESH_LIB:-$_this_dir}"
+
+source "$_lib_dir/passveil.ysh"
+
+const FLOKINET_DOMAIN = "flokinet.is"
+const FLOKINET_BILLING = "https://billing.flokinet.is"
+const FLOKINET_ORDER_URL = "https://billing.flokinet.is/cart.php"
+
+# Location configurations
+const FLOKINET_LOCATIONS = {
+  fi: {
+    name: "Finland",
+    code: "FI",
+    country: "FI",
+    region: "Nordic",
+    datacenter: "Helsinki"
+  },
+  nl: {
+    name: "Netherlands",
+    code: "NL",
+    country: "NL",
+    region: "EU",
+    datacenter: "Amsterdam"
+  },
+  iceland: {
+    name: "Iceland",
+    code: "IS",
+    country: "IS",
+    region: "Nordic",
+    datacenter: "Reykjavik"
+  },
+  ro: {
+    name: "Romania",
+    code: "RO",
+    country: "RO",
+    region: "EU",
+    datacenter: "Bucharest"
+  }
+}
+
+# Recommended plan for WireGuard nodes
+const FLOKINET_RECOMMENDED_PLAN = {
+  name: "VPS Small",
+  ram: "1GB",
+  storage: "20GB SSD",
+  bandwidth: "Unmetered",
+  price: "~€5-8/mo"
+}
+
+# Get stored credentials for FlokiNET
+proc flokinet-get-credentials {
+  var creds_list = $(passveil-list "$FLOKINET_DOMAIN/")
+  if (creds_list === '') {
+    echo "Error: No FlokiNET credentials found. Run 'wg-setup.ysh wizard' first." >&2
+    return 1
+  }
+
+  # Extract email from the first credential path using shell tools
+  var email = $(echo $creds_list | grep -v '/api$' | head -1 | sed "s|$FLOKINET_DOMAIN/||")
+
+  if (email === '') {
+    echo "Error: Could not parse FlokiNET credentials" >&2
+    return 1
+  }
+
+  echo $email
+}
+
+# Interactive provisioning guide for FlokiNET
+proc flokinet-provision-interactive (location_key) {
+  var location = FLOKINET_LOCATIONS[location_key]
+  if (location === null) {
+    echo "Error: Unknown location '$location_key'. Valid: fi, nl, iceland, ro" >&2
+    return 1
+  }
+
+  print-header "FlokiNET Provisioning: $[location['name']]"
+
+  echo "Location: $[location['name']] ($[location['country']])"
+  echo "Datacenter: $[location['datacenter']]"
+  echo ""
+  echo "Recommended Plan:"
+  echo "  Name: $[FLOKINET_RECOMMENDED_PLAN['name']]"
+  echo "  RAM: $[FLOKINET_RECOMMENDED_PLAN['ram']]"
+  echo "  Storage: $[FLOKINET_RECOMMENDED_PLAN['storage']]"
+  echo "  Bandwidth: $[FLOKINET_RECOMMENDED_PLAN['bandwidth']]"
+  echo "  Price: $[FLOKINET_RECOMMENDED_PLAN['price']]"
+  echo ""
+  echo "${COLOR_CYAN}FlokiNET Privacy Features:${COLOR_RESET}"
+  echo "  • Accepts cryptocurrency payments"
+  echo "  • Offshore hosting (Iceland/Romania options)"
+  echo "  • DMCA-ignored in certain locations"
+  echo "  • No KYC requirements for crypto payments"
+  echo ""
+
+  print-info "Opening FlokiNET order page..."
+  open-url "$FLOKINET_ORDER_URL"
+
+  echo ""
+  echo "Instructions:"
+  echo "  1. Select 'VPS Hosting'"
+  echo "  2. Choose location: $[location['name']]"
+  echo "  3. Select a plan ($[FLOKINET_RECOMMENDED_PLAN['name']] or similar)"
+  echo "  4. OS: Debian 12 or Ubuntu 22.04"
+  echo "  5. Complete checkout (crypto accepted!)"
+  echo ""
+  echo "${COLOR_YELLOW}Note: FlokiNET may take a few hours to provision.${COLOR_RESET}"
+  echo "You'll receive an email with VPS details when ready."
+  echo ""
+
+  wait-for-enter "Press Enter after you've ordered the VPS..."
+
+  # Check if user has received VPS details
+  try {
+    prompt-confirm "Have you received the VPS provisioning email?"
+  }
+  if (_status === 0) {
+    # Prompt for the VPS details
+    var hostname = $(prompt-input "Enter the hostname:")
+    var ip_address = $(prompt-input "Enter the VPS IP address:")
+    var root_password = $(prompt-input "Enter the root password:")
+
+    # Store credentials in passveil
+    var node_path = "wireguard-mesh/flokinet-$location_key"
+    passveil-store "$node_path/hostname" $hostname
+    passveil-store "$node_path/ip" $ip_address
+    passveil-store "$node_path/root-password" $root_password
+
+    print-success "VPS details stored in passveil at: $node_path"
+
+    # Test SSH connectivity
+    echo ""
+    print-info "Testing SSH connectivity..."
+    try {
+      ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=no root@$ip_address "echo 'SSH connection successful'"
+    }
+    if (_status === 0) {
+      print-success "SSH connection to $ip_address successful!"
+    } else {
+      echo "${COLOR_YELLOW}Warning: Could not connect via SSH.${COLOR_RESET}"
+      echo "The VPS may still be provisioning. Try: ssh root@$ip_address"
+    }
+  } else {
+    echo ""
+    print-info "No problem! Run this command again once you receive the email."
+    echo "  ysh bin/wg-setup.ysh provision --provider flokinet --location $location_key"
+  }
+
+  return 0
+}
+
+# Setup WireGuard on a FlokiNET node via SSH
+proc flokinet-setup-wireguard (location_key) {
+  var node_path = "wireguard-mesh/flokinet-$location_key"
+
+  # Get stored credentials
+  var ip = $(passveil-get "$node_path/ip" 2>/dev/null)
+  if (ip === '') {
+    echo "Error: No VPS found for flokinet-$location_key. Run provisioning first." >&2
+    return 1
+  }
+
+  print-info "Setting up WireGuard on FlokiNET $location_key ($ip)..."
+
+  # Install WireGuard via SSH
+  ssh root@$ip << 'REMOTE_SCRIPT'
+    set -e
+
+    # Update and install WireGuard
+    apt-get update
+    apt-get install -y wireguard wireguard-tools
+
+    # Enable IP forwarding
+    echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-wireguard.conf
+    echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.d/99-wireguard.conf
+    sysctl -p /etc/sysctl.d/99-wireguard.conf
+
+    # Generate WireGuard keys if not exists
+    if [ ! -f /etc/wireguard/private.key ]; then
+      wg genkey > /etc/wireguard/private.key
+      chmod 600 /etc/wireguard/private.key
+      cat /etc/wireguard/private.key | wg pubkey > /etc/wireguard/public.key
+    fi
+
+    # Configure firewall for WireGuard
+    if command -v ufw >/dev/null 2>&1; then
+      ufw allow 51820/udp
+      ufw --force enable
+    fi
+
+    echo "WireGuard installed and keys generated"
+    echo "Public key: $(cat /etc/wireguard/public.key)"
+REMOTE_SCRIPT
+
+  if (_status !== 0) {
+    echo "Error: Failed to setup WireGuard on $ip" >&2
+    return 1
+  }
+
+  # Fetch and store the public key
+  var pubkey = $(ssh root@$ip "cat /etc/wireguard/public.key")
+  passveil-store "$node_path/wg-public-key" $pubkey
+
+  print-success "WireGuard setup complete for flokinet-$location_key"
+  print-info "Public key: $pubkey"
+
+  return 0
+}
+
+# Get node info for a FlokiNET location
+proc flokinet-get-node-info (location_key) {
+  var node_path = "wireguard-mesh/flokinet-$location_key"
+
+  var ip = $(passveil-get "$node_path/ip" 2>/dev/null)
+  var pubkey = $(passveil-get "$node_path/wg-public-key" 2>/dev/null)
+  var hostname = $(passveil-get "$node_path/hostname" 2>/dev/null)
+
+  if (ip === '') {
+    return 1
+  }
+
+  echo "location=$location_key"
+  echo "provider=flokinet"
+  echo "ip=$ip"
+  echo "hostname=$hostname"
+  echo "wg_pubkey=$pubkey"
+}
+
+# List all configured FlokiNET nodes
+proc flokinet-list-nodes {
+  echo "${COLOR_BOLD}FlokiNET Nodes:${COLOR_RESET}"
+
+  for loc_key in (FLOKINET_LOCATIONS) {
+    var loc = FLOKINET_LOCATIONS[loc_key]
+    var node_path = "wireguard-mesh/flokinet-$loc_key"
+    var ip = $(passveil-get "$node_path/ip" 2>/dev/null)
+    var loc_name = loc['name']
+
+    if (ip !== '') {
+      var pubkey = $(passveil-get "$node_path/wg-public-key" 2>/dev/null)
+      echo "  ${COLOR_GREEN}✓${COLOR_RESET} $loc_name ($loc_key): $ip"
+      if (pubkey !== '') {
+        var pubkey_short = pubkey[:20]
+        echo "    WG Pubkey: $pubkey_short..."
+      }
+    } else {
+      echo "  ${COLOR_YELLOW}○${COLOR_RESET} $loc_name ($loc_key): Not provisioned"
+    }
+  }
+}
+

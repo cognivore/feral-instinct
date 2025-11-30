@@ -1,0 +1,369 @@
+#!/usr/bin/env ysh
+# WireGuard Mesh Setup - Main CLI Entry Point
+#
+# Usage:
+#   wg-setup.ysh wizard      - Run interactive account setup wizard
+#   wg-setup.ysh status      - Show configuration status
+#   wg-setup.ysh provision   - Create VPS instances at providers
+#   wg-setup.ysh deploy      - Deploy WireGuard mesh to all nodes
+#   wg-setup.ysh add-client  - Add local client to mesh nodes
+#   wg-setup.ysh teardown    - Destroy all VPS instances
+
+# Determine lib directory - support both dev mode and installed mode
+var LIB_DIR = "${WG_MESH_LIB:-$_this_dir/../lib}"
+
+source "$LIB_DIR/wizard.ysh"
+source "$LIB_DIR/ramnode.ysh"
+source "$LIB_DIR/flokinet.ysh"
+source "$LIB_DIR/wireguard.ysh"
+
+proc usage {
+  echo "WireGuard Mesh Setup - Multi-Geo VPN Infrastructure"
+  echo ""
+  echo "Usage: wg-setup.ysh <command>"
+  echo ""
+  echo "Setup Commands:"
+  echo "  wizard        Run interactive account setup wizard"
+  echo "  status        Show current configuration status"
+  echo ""
+  echo "Infrastructure Commands:"
+  echo "  provision     Create VPS instances at configured providers"
+  echo "  setup-wg      Install WireGuard on all provisioned nodes"
+  echo "  deploy        Generate and deploy mesh configuration"
+  echo "  add-client    Add local client to all mesh nodes"
+  echo "  teardown      Destroy all VPS instances (with confirmation)"
+  echo ""
+  echo "Diagnostic Commands:"
+  echo "  mesh-status   Show status of all mesh nodes"
+  echo "  test-mesh     Test connectivity between mesh nodes"
+  echo "  gen-client    Generate client configuration file"
+  echo ""
+  echo "Workflow:"
+  echo "  1. Run 'wizard' to set up provider accounts"
+  echo "  2. Fund your accounts at each provider"
+  echo "  3. Run 'provision' to create VPS instances"
+  echo "  4. Run 'setup-wg' to install WireGuard on nodes"
+  echo "  5. Run 'deploy' to configure the mesh"
+  echo "  6. Run 'add-client' to enable client connections"
+  echo "  7. Use 'wg-connect.ysh' to connect!"
+  echo ""
+}
+
+proc cmd-wizard {
+  run-setup-wizard
+}
+
+proc cmd-status {
+  show-config-status
+  echo ""
+
+  # Also show node status
+  echo "${COLOR_BOLD}Provisioned Nodes:${COLOR_RESET}"
+  echo ""
+
+  for node_key in (MESH_NODES) {
+    var node = MESH_NODES[node_key]
+    var provider = node['provider']
+    var location = node['location']
+    var node_path = "wireguard-mesh/$provider-$location"
+
+    var ip = $(passveil-get "$node_path/ip" 2>/dev/null)
+
+    if (ip !== '') {
+      echo "  ${COLOR_GREEN}✓${COLOR_RESET} $node_key: $ip"
+    } else {
+      echo "  ${COLOR_YELLOW}○${COLOR_RESET} $node_key: Not provisioned"
+    }
+  }
+}
+
+proc cmd-provision {
+  print-header "VPS Provisioning"
+
+  echo "This will guide you through provisioning VPS instances:"
+  echo ""
+  echo "  RamNode (Manual via web panel):"
+  echo "    • Seattle, US West"
+  echo "    • NYC, US East"
+  echo "    • Los Angeles, US West"
+  echo "    • Atlanta, US South"
+  echo ""
+  echo "  FlokiNET (Manual via web panel):"
+  echo "    • Finland, Nordic"
+  echo "    • Netherlands, EU West"
+  echo "    • Iceland, Nordic"
+  echo "    • Romania, EU East"
+  echo ""
+
+  try {
+    prompt-confirm "Proceed with provisioning?"
+  }
+  if (_status !== 0) {
+    echo "Provisioning cancelled."
+    return 1
+  }
+
+  # Provision RamNode nodes
+  echo ""
+  try {
+    prompt-confirm "Provision RamNode Seattle (US West)?"
+  }
+  if (_status === 0) {
+    ramnode-provision-interactive "seattle"
+  }
+
+  echo ""
+  try {
+    prompt-confirm "Provision RamNode NYC (US East)?"
+  }
+  if (_status === 0) {
+    ramnode-provision-interactive "nyc"
+  }
+
+  echo ""
+  try {
+    prompt-confirm "Provision RamNode LA (US West)?"
+  }
+  if (_status === 0) {
+    ramnode-provision-interactive "la"
+  }
+
+  echo ""
+  try {
+    prompt-confirm "Provision RamNode Atlanta (US South)?"
+  }
+  if (_status === 0) {
+    ramnode-provision-interactive "atlanta"
+  }
+
+  # Provision FlokiNET nodes
+  echo ""
+  try {
+    prompt-confirm "Provision FlokiNET Finland?"
+  }
+  if (_status === 0) {
+    flokinet-provision-interactive "fi"
+  }
+
+  echo ""
+  try {
+    prompt-confirm "Provision FlokiNET Netherlands?"
+  }
+  if (_status === 0) {
+    flokinet-provision-interactive "nl"
+  }
+
+  echo ""
+  try {
+    prompt-confirm "Provision FlokiNET Iceland?"
+  }
+  if (_status === 0) {
+    flokinet-provision-interactive "iceland"
+  }
+
+  echo ""
+  try {
+    prompt-confirm "Provision FlokiNET Romania?"
+  }
+  if (_status === 0) {
+    flokinet-provision-interactive "ro"
+  }
+
+  print-header "Provisioning Complete"
+  echo "Next step: Run 'wg-setup.ysh setup-wg' to install WireGuard on nodes"
+}
+
+proc cmd-setup-wg {
+  print-header "WireGuard Installation"
+
+  echo "Installing WireGuard on all provisioned nodes..."
+  echo ""
+
+  var success = 0
+  var failed = 0
+  var node_path = ''
+  var node_ip = ''
+
+  # Setup RamNode nodes
+  for loc in (['seattle', 'nyc', 'la', 'atlanta']) {
+    setvar node_path = "wireguard-mesh/ramnode-$loc"
+    setvar node_ip = $(passveil-get "$node_path/ip" 2>/dev/null)
+
+    if (node_ip !== '') {
+      print-info "Setting up ramnode-$loc..."
+      try {
+        ramnode-setup-wireguard $loc
+      }
+      if (_status === 0) {
+        setvar success = success + 1
+      } else {
+        setvar failed = failed + 1
+      }
+    }
+  }
+
+  # Setup FlokiNET nodes
+  for loc in (['fi', 'nl', 'iceland', 'ro']) {
+    setvar node_path = "wireguard-mesh/flokinet-$loc"
+    setvar node_ip = $(passveil-get "$node_path/ip" 2>/dev/null)
+
+    if (node_ip !== '') {
+      print-info "Setting up flokinet-$loc..."
+      try {
+        flokinet-setup-wireguard $loc
+      }
+      if (_status === 0) {
+        setvar success = success + 1
+      } else {
+        setvar failed = failed + 1
+      }
+    }
+  }
+
+  echo ""
+  print-header "Setup Summary"
+  echo "Successful: $success"
+  echo "Failed: $failed"
+  echo ""
+  echo "Next step: Run 'wg-setup.ysh deploy' to configure the mesh"
+}
+
+proc cmd-deploy {
+  print-header "WireGuard Mesh Deployment"
+
+  echo "This will generate and deploy mesh configurations to all nodes."
+  echo ""
+
+  try {
+    prompt-confirm "Proceed with deployment?"
+  }
+  if (_status !== 0) {
+    echo "Deployment cancelled."
+    return 1
+  }
+
+  wg-deploy-mesh
+
+  echo ""
+  echo "Next step: Run 'wg-setup.ysh add-client' to enable client connections"
+}
+
+proc cmd-add-client {
+  print-header "Add Client to Mesh"
+
+  # First generate client config to ensure keys exist
+  echo "Generating client configuration..."
+  wg-generate-client-config > /dev/null
+
+  # Add client to all mesh nodes
+  wg-add-client-to-mesh
+
+  echo ""
+  echo "Client added to mesh nodes."
+  echo ""
+  echo "To connect, run: wg-connect.ysh"
+  echo "Or generate config: wg-setup.ysh gen-client > ~/wg-mesh.conf"
+}
+
+proc cmd-mesh-status {
+  wg-mesh-status
+}
+
+proc cmd-test-mesh {
+  wg-test-mesh
+}
+
+proc cmd-gen-client {
+  wg-generate-client-config
+}
+
+proc cmd-teardown {
+  print-header "VPS Teardown"
+  echo "${COLOR_YELLOW}WARNING: This will guide you through destroying VPS instances!${COLOR_RESET}"
+  echo ""
+  echo "Note: Actual instance deletion must be done via provider web panels."
+  echo "This command will clean up local configuration."
+  echo ""
+
+  try {
+    prompt-confirm "Are you SURE you want to proceed?"
+  }
+  if (_status !== 0) {
+    echo "Teardown cancelled."
+    return 0
+  }
+
+  echo ""
+  echo "To delete VPS instances:"
+  echo ""
+  echo "  RamNode:"
+  echo "    1. Go to https://clientarea.ramnode.com"
+  echo "    2. Select each VPS and request cancellation"
+  echo ""
+  echo "  FlokiNET:"
+  echo "    1. Go to https://billing.flokinet.is/clientarea.php"
+  echo "    2. Select each VPS and request cancellation"
+  echo ""
+
+  try {
+    prompt-confirm "Clean up local configuration files?"
+  }
+  if (_status === 0) {
+    echo "Removing local mesh configuration..."
+
+    # Remove stored credentials (keep provider account credentials)
+    for node_key in (MESH_NODES) {
+      var node = MESH_NODES[node_key]
+      var provider = node['provider']
+      var location = node['location']
+      var node_path = "wireguard-mesh/$provider-$location"
+
+      try {
+        passveil-delete "$node_path/ip"
+        passveil-delete "$node_path/hostname"
+        passveil-delete "$node_path/root-password"
+        passveil-delete "$node_path/wg-private-key"
+        passveil-delete "$node_path/wg-public-key"
+      }
+    }
+
+    # Remove client keys
+    try {
+      passveil-delete "wireguard-mesh/client/wg-private-key"
+      passveil-delete "wireguard-mesh/client/wg-public-key"
+    }
+
+    print-success "Local configuration cleaned"
+  }
+
+  echo ""
+  echo "Don't forget to actually delete the VPS instances via provider panels!"
+}
+
+# Main entry point
+if (len(ARGV) === 0) {
+  usage
+  exit 1
+}
+
+var command = ARGV[0]
+
+case (command) {
+  wizard      { cmd-wizard }
+  status      { cmd-status }
+  provision   { cmd-provision }
+  setup-wg    { cmd-setup-wg }
+  deploy      { cmd-deploy }
+  add-client  { cmd-add-client }
+  mesh-status { cmd-mesh-status }
+  test-mesh   { cmd-test-mesh }
+  gen-client  { cmd-gen-client }
+  teardown    { cmd-teardown }
+  help | -h | --help { usage }
+  (else) {
+    echo "Unknown command: $command"
+    echo ""
+    usage
+    exit 1
+  }
+}

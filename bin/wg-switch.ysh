@@ -1,0 +1,346 @@
+#!/usr/bin/env ysh
+# WireGuard Mesh - TUI Route Switcher
+#
+# Interactive TUI for quickly switching which mesh node you route through.
+# Uses gum for beautiful terminal UI.
+#
+# Usage:
+#   wg-switch.ysh           - Open TUI selector
+#   wg-switch.ysh --quick   - Quick switch (remembers last selection)
+
+var _this_dir = $(dirname $0)
+
+# Determine lib directory - support both dev mode and installed mode
+var LIB_DIR = "${WG_MESH_LIB:-$_this_dir/../lib}"
+var CONFIG_DIR = "$[ENV.HOME]/.config/wireguard-mesh"
+
+source "$LIB_DIR/passveil.ysh"
+source "$LIB_DIR/wireguard.ysh"
+source "$LIB_DIR/tui.ysh"
+
+const WG_INTERFACE = "wg-mesh"
+
+# Get current connection status
+proc get-current-node {
+  # Check if WireGuard interface exists and get endpoint
+  if ! test -e "/var/run/wireguard/$WG_INTERFACE.name" {
+    echo ""
+    return 1
+  }
+
+  # Try to get the current endpoint
+  var endpoint = $(sudo wg show $WG_INTERFACE endpoints 2>/dev/null | awk '{print $2}' | cut -d: -f1)
+
+  if test -z "$endpoint" {
+    echo ""
+    return 1
+  }
+
+  # Match endpoint to node
+  for node_key in (MESH_NODES) {
+    var node = MESH_NODES[node_key]
+    var provider = node['provider']
+    var location = node['location']
+    var node_path = "wireguard-mesh/$provider-$location"
+
+    var node_ip = $(passveil-get "$node_path/ip" 2>/dev/null)
+    if (node_ip === endpoint) {
+      echo $node_key
+      return 0
+    }
+  }
+
+  echo ""
+  return 1
+}
+
+# Build node list with status indicators
+proc build-node-options {
+  var current = $(get-current-node)
+
+  for node_key in (MESH_NODES) {
+    var node = MESH_NODES[node_key]
+    var provider = node['provider']
+    var location = node['location']
+    var node_path = "wireguard-mesh/$provider-$location"
+    var node_name = node['name']
+
+    var public_ip = $(passveil-get "$node_path/ip" 2>/dev/null)
+
+    if test -z "$public_ip" {
+      # Not provisioned - skip
+      continue
+    }
+
+    # Build display line
+    var status = "○"
+    if (node_key === current) {
+      setvar status = "●"
+    }
+
+    # Format: key | name | region | status indicator
+    var region = ""
+    case (node_key) {
+      ramnode-sea { setvar region = "US West" }
+      ramnode-nyc { setvar region = "US East" }
+      ramnode-la  { setvar region = "US West" }
+      ramnode-atl { setvar region = "US South" }
+      flokinet-fi { setvar region = "Nordic" }
+      flokinet-nl { setvar region = "EU West" }
+      flokinet-is { setvar region = "Nordic" }
+      flokinet-ro { setvar region = "EU East" }
+    }
+
+    echo "$node_key │ $node_name │ $region │ $status"
+  }
+}
+
+# TUI node selector
+proc select-node-tui {
+  var current = $(get-current-node)
+
+  tui-header "WireGuard Mesh - Route Switcher"
+
+  if test -n "$current" {
+    tui-info "Currently connected to: $current"
+  } else {
+    tui-warn "Not currently connected to any node"
+  }
+  echo ""
+
+  gum style --foreground 248 "Select a node to connect to (ESC to cancel):"
+  echo ""
+
+  # Get available nodes
+  var options = $(build-node-options)
+
+  if test -z "$options" {
+    tui-error "No provisioned nodes found!"
+    echo ""
+    echo "Run these commands first:"
+    echo "  ysh bin/wg-setup.ysh wizard    # Configure provider accounts"
+    echo "  ysh bin/wg-setup.ysh provision # Create VPS instances"
+    echo "  ysh bin/wg-setup.ysh deploy    # Deploy WireGuard configs"
+    return 1
+  }
+
+  var selected = $(echo "$options" | gum choose \
+    --cursor.foreground 212 \
+    --selected.foreground 82 \
+    --header.foreground 248)
+
+  if test -z "$selected" {
+    echo "Selection cancelled."
+    return 1
+  }
+
+  # Extract node key from selection
+  var node_key = $(echo "$selected" | awk -F '│' '{print $1}' | tr -d ' ')
+
+  echo $node_key
+}
+
+# Quick switch - use last selection or first available
+proc quick-switch {
+  var last_file = "$CONFIG_DIR/.last-node"
+  var node_key = ""
+
+  if test -f "$last_file" {
+    setvar node_key = $(cat "$last_file")
+  }
+
+  # Verify node is still valid
+  if test -n "$node_key" {
+    var node_path = "wireguard-mesh/$node_key"
+    var ip = $(passveil-get "$node_path/ip" 2>/dev/null)
+    if test -z "$ip" {
+      setvar node_key = ""
+    }
+  }
+
+  # Fall back to first available
+  if test -z "$node_key" {
+    for nk in (MESH_NODES) {
+      var node = MESH_NODES[nk]
+      var provider = node['provider']
+      var location = node['location']
+      var np = "wireguard-mesh/$provider-$location"
+
+      var node_ip = $(passveil-get "$np/ip" 2>/dev/null)
+      if test -n "$node_ip" {
+        setvar node_key = nk
+        break
+      }
+    }
+  }
+
+  if test -z "$node_key" {
+    tui-error "No available nodes to connect to"
+    return 1
+  }
+
+  echo $node_key
+}
+
+# Connect to a node (reusing logic from wg-connect.ysh)
+proc switch-to-node (node_key) {
+  var node = MESH_NODES[node_key]
+  if (node === null) {
+    tui-error "Unknown node: $node_key"
+    return 1
+  }
+
+  var provider = node['provider']
+  var location = node['location']
+  var node_path = "wireguard-mesh/$provider-$location"
+  var node_name = node['name']
+  var node_internal_ip = node['internal_ip']
+
+  var public_ip = $(passveil-get "$node_path/ip" 2>/dev/null)
+  var node_pubkey = $(passveil-get "$node_path/wg-public-key" 2>/dev/null)
+
+  if test -z "$public_ip" || test -z "$node_pubkey" {
+    tui-error "Node $node_key not fully configured"
+    return 1
+  }
+
+  # Get client keys
+  var client_path = "wireguard-mesh/client"
+  var client_priv = $(passveil-get "$client_path/wg-private-key" 2>/dev/null)
+
+  if test -z "$client_priv" {
+    tui-info "Generating client keys..."
+    var private_key = $(wg genkey)
+    var public_key = $(echo $private_key | wg pubkey)
+    passveil-store "$client_path/wg-private-key" $private_key
+    passveil-store "$client_path/wg-public-key" $public_key
+    setvar client_priv = private_key
+
+    tui-warn "New client - run 'wg-setup.ysh add-client' to authorize"
+    echo ""
+  }
+
+  var client_ip = CLIENT_NODE['internal_ip']
+
+  # Create config
+  mkdir -p $CONFIG_DIR
+  var config_file = "$CONFIG_DIR/$WG_INTERFACE.conf"
+
+  cat > $config_file << EOF
+# WireGuard Mesh Client Configuration
+# Node: $node_key ($node_name)
+# Mode: full tunnel
+
+[Interface]
+PrivateKey = $client_priv
+Address = $client_ip/24
+DNS = 1.1.1.1, 8.8.8.8
+
+[Peer]
+PublicKey = $node_pubkey
+Endpoint = $public_ip:$WG_PORT
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25
+EOF
+
+  chmod 600 $config_file
+
+  # Disconnect existing
+  try {
+    sudo wg-quick down $config_file 2>/dev/null
+  }
+
+  # Connect
+  tui-spin "Connecting to $node_key..." sudo wg-quick up $config_file
+
+  if (_status !== 0) {
+    tui-error "Failed to connect"
+    return 1
+  }
+
+  # Save as last used
+  echo $node_key > "$CONFIG_DIR/.last-node"
+
+  tui-success "Connected to $node_key ($node_name)"
+  echo ""
+
+  # Show new IP
+  echo "Verifying connection..."
+  sleep 1
+  var new_ip = $(curl -s --max-time 5 https://ifconfig.me)
+  if test -n "$new_ip" {
+    tui-kv "Your IP" "$new_ip"
+  }
+
+  return 0
+}
+
+# Disconnect
+proc do-disconnect {
+  var config_file = "$CONFIG_DIR/$WG_INTERFACE.conf"
+
+  try {
+    sudo wg-quick down $WG_INTERFACE 2>/dev/null
+  }
+
+  if test -f "$config_file" {
+    try {
+      sudo wg-quick down $config_file 2>/dev/null
+    }
+  }
+
+  tui-success "Disconnected"
+}
+
+# Usage
+proc usage {
+  echo "WireGuard Mesh - TUI Route Switcher"
+  echo ""
+  echo "Usage: wg-switch.ysh [options]"
+  echo ""
+  echo "Options:"
+  echo "  (none)       Open interactive TUI selector"
+  echo "  --quick, -q  Quick switch to last/first available node"
+  echo "  --off, -d    Disconnect from VPN"
+  echo "  --help, -h   Show this help"
+  echo ""
+}
+
+# Main
+proc main {
+  # Check for gum
+  if ! command -v gum >/dev/null 2>&1 {
+    echo "Error: gum is required for TUI. Run from nix shell or install gum." >&2
+    exit 1
+  }
+
+  var action = "tui"
+
+  for arg in (ARGV) {
+    case (arg) {
+      --quick | -q { setvar action = "quick" }
+      --off | -d   { setvar action = "disconnect" }
+      --help | -h  { usage; exit 0 }
+    }
+  }
+
+  var selected_node = ""
+  case (action) {
+    disconnect { do-disconnect }
+    quick {
+      setvar selected_node = $(quick-switch)
+      if test -n "$selected_node" {
+        switch-to-node $selected_node
+      }
+    }
+    tui {
+      setvar selected_node = $(select-node-tui)
+      if test -n "$selected_node" {
+        switch-to-node $selected_node
+      }
+    }
+  }
+}
+
+main
+

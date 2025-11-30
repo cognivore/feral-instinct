@@ -1,0 +1,237 @@
+#!/usr/bin/env ysh
+# TUI helper library using gum (charmbracelet)
+#
+# Provides beautiful terminal UI components for the WireGuard mesh tools.
+# Requires: gum (https://github.com/charmbracelet/gum)
+
+# Source guard
+if test -n "${_TUI_SOURCED:-}" {
+  return 0
+}
+setglobal _TUI_SOURCED = "1"
+
+# Check if gum is available
+proc tui-check-gum {
+  if ! command -v gum >/dev/null 2>&1 {
+    echo "Error: gum is not installed. Please run from nix shell or install gum." >&2
+    echo "  nix develop  # or" >&2
+    echo "  brew install gum" >&2
+    return 1
+  }
+  return 0
+}
+
+# Display a styled header
+proc tui-header (text) {
+  gum style \
+    --foreground 212 \
+    --border-foreground 212 \
+    --border double \
+    --align center \
+    --width 60 \
+    --margin "1 2" \
+    --padding "1 2" \
+    "$text"
+}
+
+# Display a spinner while running a command
+# Usage: tui-spin "Loading..." command arg1 arg2
+proc tui-spin (title) {
+  # Shift off the title, pass remaining args to gum spin
+  shift
+  gum spin --spinner dot --title "$title" -- @ARGV
+}
+
+# Confirm dialog (returns 0 for yes, 1 for no)
+proc tui-confirm (prompt) {
+  gum confirm "$prompt"
+  return $_status
+}
+
+# Single choice selection with arrow keys
+# Usage: tui-choose "Option 1" "Option 2" "Option 3"
+# Returns: selected option on stdout
+proc tui-choose {
+  gum choose --cursor.foreground 212 @ARGV
+}
+
+# Multi-select with arrow keys and space to toggle
+# Usage: tui-multi-select "Option 1" "Option 2" "Option 3"
+# Returns: selected options (one per line) on stdout
+proc tui-multi-select {
+  gum choose --no-limit --cursor.foreground 212 --selected.foreground 212 @ARGV
+}
+
+# Multi-select with some options pre-selected
+# Usage: tui-multi-select-preselected "opt1,opt2" "Option 1" "Option 2" "Option 3"
+proc tui-multi-select-preselected (selected_csv) {
+  shift
+  gum choose --no-limit \
+    --cursor.foreground 212 \
+    --selected.foreground 212 \
+    --selected "$selected_csv" \
+    @ARGV
+}
+
+# Text input prompt
+# Usage: tui-input "Enter your email:" "default@example.com"
+proc tui-input (prompt; default_value="") {
+  if (default_value !== '') {
+    gum input --placeholder "$prompt" --value "$default_value"
+  } else {
+    gum input --placeholder "$prompt"
+  }
+}
+
+# Password input (masked)
+proc tui-password (prompt) {
+  gum input --password --placeholder "$prompt"
+}
+
+# Display formatted text with a specific style
+proc tui-info (text) {
+  gum style --foreground 39 "→ $text"
+}
+
+proc tui-success (text) {
+  gum style --foreground 82 "✓ $text"
+}
+
+proc tui-warn (text) {
+  gum style --foreground 214 "⚠ $text"
+}
+
+proc tui-error (text) {
+  gum style --foreground 196 "✗ $text"
+}
+
+# Display a list with bullet points
+# Usage: tui-list "Item 1" "Item 2" ...
+proc tui-list {
+  for item in (ARGV) {
+    gum style --foreground 248 "  • $item"
+  }
+}
+
+# Display a formatted table-like output
+proc tui-kv (key, value) {
+  var formatted_key = $(gum style --foreground 248 "$key:")
+  var formatted_value = $(gum style --foreground 255 "$value")
+  echo "$formatted_key $formatted_value"
+}
+
+# Show a pager for long content
+proc tui-pager {
+  gum pager
+}
+
+# Filter/search through options
+# Usage: tui-filter "Option 1" "Option 2" "Option 3"
+proc tui-filter {
+  printf '%s\n' @ARGV | gum filter --placeholder "Search..."
+}
+
+# Write output to file with animation
+proc tui-write (text) {
+  echo "$text" | gum format
+}
+
+# Join array elements with a delimiter
+proc tui-join-lines (delimiter) {
+  # Read from stdin, join with delimiter
+  var lines = []
+  while read -r line {
+    append $line (lines)
+  }
+  var result = ''
+  var first = true
+  for line in (lines) {
+    if (first) {
+      setvar result = line
+      setvar first = false
+    } else {
+      setvar result = "$result$delimiter$line"
+    }
+  }
+  echo $result
+}
+
+# ============================================
+# High-level TUI components for wg-mesh
+# ============================================
+
+# Location selector for provisioning
+# Returns selected location keys (one per line)
+# Decorative output goes to stderr
+proc tui-select-locations {
+  # Send decorative output to stderr
+  tui-header "Select VPS Locations" >&2
+  echo "" >&2
+  echo "Available locations:" >&2
+  echo "  ramnode-sea  │ Seattle      │ US West    │ RamNode  │ ~\$5/mo" >&2
+  echo "  ramnode-nyc  │ New York     │ US East    │ RamNode  │ ~\$5/mo" >&2
+  echo "  ramnode-la   │ Los Angeles  │ US West    │ RamNode  │ ~\$5/mo" >&2
+  echo "  ramnode-atl  │ Atlanta      │ US South   │ RamNode  │ ~\$5/mo" >&2
+  echo "  flokinet-fi  │ Finland      │ Nordic     │ FlokiNET │ ~€5-8/mo" >&2
+  echo "  flokinet-nl  │ Netherlands  │ EU West    │ FlokiNET │ ~€5-8/mo" >&2
+  echo "  flokinet-is  │ Iceland      │ Nordic     │ FlokiNET │ ~€5-8/mo" >&2
+  echo "  flokinet-ro  │ Romania      │ EU East    │ FlokiNET │ ~€5-8/mo" >&2
+  echo "" >&2
+
+  # gum choose displays UI on stderr, returns clean selection on stdout
+  var selected = $(gum choose --no-limit \
+    --cursor.foreground 212 \
+    --selected.foreground 82 \
+    --header "Select locations (SPACE to toggle, ENTER to confirm):" \
+    "ramnode-sea" \
+    "ramnode-nyc" \
+    "ramnode-la" \
+    "ramnode-atl" \
+    "flokinet-fi" \
+    "flokinet-nl" \
+    "flokinet-is" \
+    "flokinet-ro")
+
+  if (selected === '') {
+    return 1
+  }
+
+  # Output clean location keys
+  echo "$selected"
+}
+
+# Node switcher for routing
+# Usage: tui-select-node "current_node" "node1|description" "node2|description" ...
+# Returns selected node key
+proc tui-select-node (current_node) {
+  tui-header "Switch VPN Node"
+
+  echo ""
+  if (current_node !== '') {
+    tui-info "Currently connected to: $current_node"
+  } else {
+    tui-warn "Not currently connected"
+  }
+  echo ""
+
+  # Remaining args are the node options
+  shift
+
+  var selected = $(gum choose \
+    --cursor.foreground 212 \
+    --header "Select node to connect:" \
+    @ARGV)
+
+  if (selected === '') {
+    return 1
+  }
+
+  # Extract node key from selection
+  echo "$selected" | awk -F '│' '{print $1}' | tr -d ' '
+}
+
+# Progress indicator for multi-step operations
+proc tui-step (current, total, message) {
+  gum style --foreground 212 "[$current/$total]" --bold | tr -d '\n'
+  echo " $message"
+}
